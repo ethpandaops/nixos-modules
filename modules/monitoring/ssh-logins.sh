@@ -14,6 +14,8 @@ declare -A known=() counts=()
 for file in "$keys_dir"/*; do
   [ -f "$file" ] || continue
   user=${file##*/}
+  # <user>.mode, .uid and .gid tell activation how to copy <user>'s file.
+  case "$user" in *.mode | *.uid | *.gid) continue ;; esac
   counts["$user known"]=0
   counts["$user unknown"]=0
   while read -r _ fingerprint _; do
@@ -23,6 +25,8 @@ done
 
 if [ -r "$counts_file" ]; then
   while read -r user key count; do
+    # A 0 is only a seed; seed only users who have a key file now.
+    [ "$count" != 0 ] || [ -n "${counts["$user $key"]+set}" ] || continue
     counts["$user $key"]=$count
   done <"$counts_file"
 fi
