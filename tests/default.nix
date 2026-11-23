@@ -41,6 +41,7 @@ in
   monitoring = vmTest ./vm/monitoring.nix;
   raid1-disks-bios = raid1Test false;
   raid1-disks-uefi = raid1Test true;
+  comin-ssh = vmTest ./vm/comin-ssh.nix;
 
   formatting = pkgs.runCommand "formatting" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
     cd ${self}

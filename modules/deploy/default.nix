@@ -14,6 +14,14 @@ let
   hc = cfg.healthCheck;
   hostName = config.networking.hostName;
 
+  # comin's git client (go-git) logs in as auth.username, comin's default
+  # "comin", not as the user in the URL; GitHub only accepts "git".
+  sshUser =
+    let
+      m = builtins.match "(ssh://)?([^@/:]+)@.*" cfg.repository;
+    in
+    if m == null then "git" else builtins.elemAt m 1;
+
   settings = pkgs.writeText "nixhost-deploy.json" (
     builtins.toJSON {
       inherit (cfg)
@@ -169,6 +177,7 @@ in
           name = "origin";
           url = cfg.repository;
           auth = lib.optionalAttrs (cfg.deployKeyFile != null) {
+            username = sshUser;
             ssh_deploy_key_path = cfg.deployKeyFile;
             ssh_known_hosts_path = cfg.knownHostsFile;
           };
