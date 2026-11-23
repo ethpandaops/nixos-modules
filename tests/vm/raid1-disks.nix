@@ -26,7 +26,6 @@ diskoLib.testLib.makeDiskoTest {
   extraInstallerConfig.boot.kernelPackages = pkgs.linuxPackages_latest;
   extraSystemConfig = {
     imports = [ self.nixosModules.raid1-disks ];
-    boot.kernelPackages = pkgs.linuxPackages_latest;
     # The harness sets these per firmware mode; the module installs for both
     # in either mode, which is what this test checks.
     boot.loader.grub.efiSupport = pkgs.lib.mkForce true;
