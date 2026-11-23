@@ -137,6 +137,15 @@ while read -r proto _ _ _ local _ process; do
   case "$address" in 127.* | "[::1]" | "[::ffff:127."*) continue ;; esac
   name=unknown
   [[ $process =~ users:\(\(\"([^\"]+)\" ]] && name=${BASH_REMATCH[1]}
+  # ss gives the command name, cut to 15 characters, and NixOS's wrappers
+  # make it .<program>-wrapped (.tailscaled-wra); the executable's file name
+  # says which program it is.
+  if [[ $process =~ pid=([0-9]+) ]] && exe=$(readlink "/proc/${BASH_REMATCH[1]}/exe"); then
+    name=${exe% (deleted)}
+    name=${name##*/}
+    name=${name#.}
+    name=${name%-wrapped}
+  fi
   [ -z "${ignore_process[$name]:-}" ] || continue
   is_open "$proto" "$port" && continue
   listening["$proto:$port $name"]=1

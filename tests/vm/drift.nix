@@ -21,6 +21,7 @@ in
       self.nixosModules.deploy
     ];
     ethpandaops.monitoring.tailscale.enable = false;
+    ethpandaops.monitoring.drift.listeners.ignoreProcesses = [ "ignored-listener" ];
     # The deploy module only for deployed.json's place and the branch name.
     ethpandaops.deploy = {
       repository = "/var/lib/remote.git";
@@ -213,6 +214,12 @@ in
         assert value(out, "nixhost_drift_unexpected_listeners") == 0, out
         assert value(out, "nixhost_drift_firewall_rules") == 0, out
         python = "${pkgs.python3.interpreter}"
+        # An ignored program, named the way NixOS wraps programs, so ss shows
+        # a cut command name (.ignored-listen).
+        server.succeed(
+            "cp ${pkgs.socat}/bin/socat /var/lib/.ignored-listener-wrapped",
+            "systemd-run --unit=ignored-listener /var/lib/.ignored-listener-wrapped TCP-LISTEN:8083,fork,reuseaddr EXEC:true",
+        )
         server.succeed(
             f"systemd-run --unit=stray-listener {python} -m http.server 8081",
             f"systemd-run --unit=loopback-listener {python} -m http.server 8082 --bind 127.0.0.1",
@@ -220,13 +227,14 @@ in
         )
         server.wait_until_succeeds("ss -H -ltn | grep -q ':8081 '")
         server.wait_until_succeeds("ss -H -ltn | grep -q ':8082 '")
+        server.wait_until_succeeds("ss -H -ltn | grep -q ':8083 '")
         out = metrics("nixhost-drift")
         assert value(out, "nixhost_drift_unexpected_listeners") == 1, out
         assert re.search(r'^nixhost_drift_unexpected_listeners_info\{listener="tcp:8081 python3[^"]*"\} 1$', out, re.M), out
         assert value(out, "nixhost_drift_firewall_rules") == 1, out
         assert 'nixhost_drift_firewall_rules_info{rule="+ iptables filter: -A INPUT -p tcp -m tcp --dport 8081 -j ACCEPT"} 1' in out, out
         server.succeed(
-            "systemctl stop stray-listener loopback-listener",
+            "systemctl stop stray-listener loopback-listener ignored-listener",
             "iptables -D INPUT -p tcp --dport 8081 -j ACCEPT",
         )
         out = metrics("nixhost-drift")

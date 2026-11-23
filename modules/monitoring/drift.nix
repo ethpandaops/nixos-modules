@@ -112,7 +112,9 @@ let
           ]
           ++ cfg.listeners.allowed
         );
-        inherit (cfg.listeners) ignoreProcesses;
+        # tailscaled listens on changing ports on its tailnet address.
+        ignoreProcesses =
+          cfg.listeners.ignoreProcesses ++ lib.optional config.services.tailscale.enable "tailscaled";
       };
       # NixOS's own rules: the iptables firewall's nixos-fw* chains and the
       # INPUT and PREROUTING jumps, or the nftables firewall's table.
@@ -225,8 +227,9 @@ in
       };
       ignoreProcesses = lib.mkOption {
         type = lib.types.listOf lib.types.str;
-        default = [ "tailscaled" ];
-        description = "Processes whose listening sockets aren't reported. tailscaled listens on changing ports on its tailnet address.";
+        default = [ ];
+        example = [ "dockerd" ];
+        description = "Programs whose listening sockets aren't reported, by executable name without NixOS's wrapper (.<name>-wrapped). tailscaled is left out whenever Tailscale is on.";
       };
     };
   };
