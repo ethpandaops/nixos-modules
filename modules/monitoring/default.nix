@@ -16,6 +16,7 @@ in
     ../metrics.nix
     ./drift.nix
     ./logs.nix
+    ./vulnix.nix
   ];
 
   options.ethpandaops.monitoring = {
