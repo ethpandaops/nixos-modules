@@ -43,7 +43,8 @@ in
     start_all()
     server.wait_for_unit("sshd.service")
     client.succeed("install -m 600 ${keys.snakeOilPrivateKey} /root/key")
-    ssh = "ssh -i /root/key -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10"
+    # -n: never read the test driver's console as stdin.
+    ssh = "ssh -n -i /root/key -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10"
 
     with subtest("a user with a key logs in; sudo works only for sudo users"):
         client.succeed(f"{ssh} alice@server true")
@@ -66,6 +67,6 @@ in
         server.succeed("install -d -o bob ~bob/.ssh")
         pub = client.succeed("cat /root/other.pub").strip()
         server.succeed(f"echo '{pub}' > ~bob/.ssh/authorized_keys && chown bob ~bob/.ssh/authorized_keys")
-        client.fail("ssh -i /root/other -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 bob@server true")
+        client.fail("ssh -n -i /root/other -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 bob@server true")
   '';
 }

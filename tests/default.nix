@@ -19,7 +19,13 @@ let
     ];
   };
 
-  vmTest = file: pkgs.testers.runNixOSTest (import file { inherit self lib pkgs; });
+  vmTest =
+    file:
+    pkgs.testers.runNixOSTest {
+      imports = [ (import file { inherit self lib pkgs; }) ];
+      # Fail with a log well before CI's job timeout cancels the run.
+      globalTimeout = 1200;
+    };
   raid1Test =
     efi:
     import ./vm/raid1-disks.nix {
