@@ -73,7 +73,7 @@ let
     common
     ++ (with pkgs; [
       iproute2
-      glibc.bin # getent
+      getent
       nix
     ])
   );

@@ -64,14 +64,24 @@ let
           continue
         fi
         case "$type" in
-          discord) body=$(jq -nc --arg m "''${message:0:1900}" '{content: $m}'); ctype=application/json ;;
+          discord)
+            # A Discord webhook URL ending in /slack is its Slack-compatible endpoint.
+            field=content
+            case "''${url%%\?*}" in */slack) field=text ;; esac
+            body=$(jq -nc --arg m "''${message:0:1900}" --arg f "$field" '{($f): $m}')
+            ctype=application/json
+            ;;
           webhook) body=$(jq -nc --arg m "$message" '{text: $m}'); ctype=application/json ;;
           ntfy) body=$message; ctype=text/plain ;;
         esac
-        if ! curl -fsS --max-time 15 --retry 3 --retry-delay 5 -o /dev/null \
-          -H "Content-Type: $ctype" --data-binary "$body" "$url"; then
-          logger -t nixhost-notify -- "delivery to a $type target failed"
+        # On failure, log curl's error and the start of the reply, on one line.
+        response=$(mktemp)
+        if ! error=$(curl -sS --fail-with-body --max-time 15 --retry 3 --retry-delay 5 -o "$response" \
+          -H "Content-Type: $ctype" --data-binary "$body" "$url" 2>&1); then
+          reply=$(head -c 300 "$response")
+          logger -t nixhost-notify -- "delivery to a $type target failed: ''${error//$'\n'/ } ''${reply//$'\n'/ }"
         fi
+        rm -f "$response"
       done
       exit 0
     '';
