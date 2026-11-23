@@ -102,6 +102,88 @@ while IFS=: read -r name _ _ _ _ home _; do
 done </etc/passwd
 finding home_authorized_keys "authorized_keys files in home directories, as user:path. sshd ignores them." file "${home_keys[@]}"
 
+# Sockets listening beyond loopback on a port the configuration doesn't open,
+# as "proto:port process". Docker's published ports bypass the firewall and
+# show up here as docker-proxy.
+declare -A open_port=() ignore_process=()
+open_ranges=()
+while read -r entry; do
+  if [[ $entry == *-* ]]; then
+    open_ranges+=("$entry")
+  else
+    open_port[$entry]=1
+  fi
+done < <(jq -r '.listen.allowed[]' "$SETTINGS")
+while read -r name; do
+  ignore_process[$name]=1
+done < <(jq -r '.listen.ignoreProcesses[]' "$SETTINGS")
+is_open() {
+  local proto=$1 port=$2 range from to
+  [ -z "${open_port[$proto:$port]:-}" ] || return 0
+  for range in "${open_ranges[@]}"; do
+    [ "${range%%:*}" = "$proto" ] || continue
+    from=${range#*:} to=${range##*-}
+    from=${from%-*}
+    [ "$port" -lt "$from" ] || [ "$port" -gt "$to" ] || return 0
+  done
+  return 1
+}
+declare -A listening=()
+# tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=1,fd=3))
+while read -r proto _ _ _ local _ process; do
+  port=${local##*:}
+  address=${local%:*}
+  address=${address%%\%*} # 0.0.0.0%eth0: bound to one interface
+  case "$address" in 127.* | "[::1]" | "[::ffff:127."*) continue ;; esac
+  name=unknown
+  [[ $process =~ users:\(\(\"([^\"]+)\" ]] && name=${BASH_REMATCH[1]}
+  [ -z "${ignore_process[$name]:-}" ] || continue
+  is_open "$proto" "$port" && continue
+  listening["$proto:$port $name"]=1
+done < <(ss -H -l -n -t -u -p)
+mapfile -t unexpected_listeners < <(printf '%s\n' "${!listening[@]}" | awk NF | sort)
+finding unexpected_listeners "Sockets listening beyond loopback on ports the configuration doesn't open, as proto:port process." listener "${unexpected_listeners[@]}"
+
+# Changes to the NixOS firewall's rules since it was last set up. The rules
+# as set up (after an activation or a firewall restart) are the baseline;
+# a later change, such as an iptables -I by hand, is reported line by line
+# ("+ added", "- removed"). Tailscale's ts-* chains change on their own and
+# aren't compared, and neither are Docker's, which aren't in these chains.
+firewall_rules() {
+  local save table
+  case "$1" in
+  iptables)
+    for save in iptables-save ip6tables-save; do
+      for table in filter mangle; do
+        { "$save" -t "$table" 2>/dev/null || true; } |
+          awk -v t="${save%-save} $table" '/^-A (INPUT|PREROUTING|nixos-[^ ]+) / && !/ -j ts-/ { print t ": " $0 }'
+      done
+    done
+    ;;
+  nftables) nft -s list table inet nixos-fw ;;
+  esac
+}
+firewall=$(jq -r '.firewall.kind // empty' "$SETTINGS")
+if [ -n "$firewall" ]; then
+  unit=$(jq -r '.firewall.unit' "$SETTINGS")
+  set_up=$(($(systemctl show -p ActiveEnterTimestampMonotonic --value "$unit") / 1000000))
+  uptime=$(cut -d. -f1 /proc/uptime)
+  activated=$(stat -c %Y /run/current-system)
+  # Leave a firewall or system that changed in the last 2 minutes alone:
+  # this run may have started while it was being set up.
+  if [ $((uptime - set_up)) -ge 120 ] && [ $((now - activated)) -ge 120 ]; then
+    key="$current $(systemctl show -p InvocationID --value "$unit")"
+    rules=$(firewall_rules "$firewall")
+    if [ "$(cat "$STATE/firewall-key" 2>/dev/null)" != "$key" ]; then
+      printf '%s\n' "$rules" >"$STATE/firewall-rules"
+      printf '%s\n' "$key" >"$STATE/firewall-key"
+    fi
+    mapfile -t changed < <(printf '%s\n' "$rules" |
+      diff --unchanged-line-format= --old-line-format='- %L' --new-line-format='+ %L' "$STATE/firewall-rules" - || true)
+    finding firewall_rules "Firewall rules added (+) or removed (-) since the firewall was set up." rule "${changed[@]}"
+  fi
+fi
+
 # comin keeps running with the configuration it started with: NixOS doesn't
 # restart it on a switch (comin restarts itself only after its own
 # deployments), so after a manual switch it runs older settings, including

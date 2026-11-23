@@ -75,6 +75,7 @@ in
         "etc_modified_files",
         "etc_unmanaged_files",
         "home_authorized_keys",
+        "unexpected_listeners",
     ]
 
     start_all()
@@ -202,6 +203,35 @@ in
         assert value(out, "nixhost_deploy_running_matches_deployed") == 1, out
         assert "nixhost_deploy_boot_matches_deployed" not in out, out
         boot(current)
+
+    with subtest("listeners and firewall rules the configuration doesn't have are reported"):
+        # The firewall check leaves a firewall or system set up in the last
+        # 2 minutes alone.
+        server.wait_until_succeeds("[ $(cut -d. -f1 /proc/uptime) -ge 130 ]", timeout=180)
+        server.succeed("touch -h -d '-10 min' /run/current-system")
+        out = metrics("nixhost-drift")
+        assert value(out, "nixhost_drift_unexpected_listeners") == 0, out
+        assert value(out, "nixhost_drift_firewall_rules") == 0, out
+        python = "${pkgs.python3.interpreter}"
+        server.succeed(
+            f"systemd-run --unit=stray-listener {python} -m http.server 8081",
+            f"systemd-run --unit=loopback-listener {python} -m http.server 8082 --bind 127.0.0.1",
+            "iptables -I INPUT -p tcp --dport 8081 -j ACCEPT",
+        )
+        server.wait_until_succeeds("ss -H -ltn | grep -q ':8081 '")
+        server.wait_until_succeeds("ss -H -ltn | grep -q ':8082 '")
+        out = metrics("nixhost-drift")
+        assert value(out, "nixhost_drift_unexpected_listeners") == 1, out
+        assert re.search(r'^nixhost_drift_unexpected_listeners_info\{listener="tcp:8081 python3[^"]*"\} 1$', out, re.M), out
+        assert value(out, "nixhost_drift_firewall_rules") == 1, out
+        assert 'nixhost_drift_firewall_rules_info{rule="+ iptables filter: -A INPUT -p tcp -m tcp --dport 8081 -j ACCEPT"} 1' in out, out
+        server.succeed(
+            "systemctl stop stray-listener loopback-listener",
+            "iptables -D INPUT -p tcp --dport 8081 -j ACCEPT",
+        )
+        out = metrics("nixhost-drift")
+        assert value(out, "nixhost_drift_unexpected_listeners") == 0, out
+        assert value(out, "nixhost_drift_firewall_rules") == 0, out
 
     with subtest("activation puts accounts, groups and /etc back, but not stray files"):
         server.succeed("/run/current-system/bin/switch-to-configuration test")
