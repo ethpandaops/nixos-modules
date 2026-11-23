@@ -1,9 +1,14 @@
 # Every flake check (the example server build, VM tests, formatting and
-# workflow lint) as its own job.
+# workflow lint) as its own job, and one `check` job that passes only when
+# all of them pass. Branch rules require `check`, so adding or renaming a
+# flake check needs no change to them.
 name: check
 on:
   pull_request:
   push:
+  # The weekly input update starts this itself: GitHub runs no push or
+  # pull_request workflows for changes made with a workflow's own token.
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -17,7 +22,7 @@ jobs:
       - id: list
         run: echo "checks=$(nix eval --json .#checks.x86_64-linux --apply builtins.attrNames)" >> "$GITHUB_OUTPUT"
 
-  check:
+  test:
     needs: list
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -30,3 +35,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
       - run: nix build -L ".#checks.x86_64-linux.${{ matrix.check }}"
+
+  check:
+    needs: [list, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every check passed
+        env:
+          LIST: ${{ needs.list.result }}
+          TEST: ${{ needs.test.result }}
+        run: |
+          echo "list: $LIST, checks: $TEST"
+          [ "$LIST" = success ] && [ "$TEST" = success ]
