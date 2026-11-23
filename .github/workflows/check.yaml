@@ -6,8 +6,7 @@ name: check
 on:
   pull_request:
   push:
-  # The weekly input update starts this itself: GitHub runs no push or
-  # pull_request workflows for changes made with a workflow's own token.
+  # By hand, such as on a branch that has no pull request.
   workflow_dispatch:
 permissions:
   contents: read

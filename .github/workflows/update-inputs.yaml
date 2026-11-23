@@ -1,6 +1,10 @@
 # Weekly: update every flake input (nixpkgs on its release branch, srvos,
 # comin, disko, sops-nix) and open or refresh one pull request with the
-# changes and links to each upstream diff. Merge it once `check` passes.
+# changes and links to each upstream diff.
+#
+# GitHub holds the pull request's `check` run until someone approves it,
+# because a workflow opened the pull request. Approve it, then merge once
+# `check` passes.
 #
 # Needs "Allow GitHub Actions to create and approve pull requests" in the
 # repository's Actions settings.
@@ -19,7 +23,6 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      actions: write # to start check.yaml on the update branch
     env:
       BRANCH: update-inputs
       GH_REPO: ${{ github.repository }}
@@ -65,7 +68,7 @@ jobs:
             done < "$RUNNER_TEMP/changes.tsv"
           } > "$RUNNER_TEMP/message"
           {
-            echo "Weekly update of the flake inputs. Merge once \`check\` passes."
+            echo "Weekly update of the flake inputs. Approve the waiting \`check\` run (GitHub holds it because a workflow opened this pull request), then merge once it passes."
             echo
             while IFS=$'\t' read -r name repo from to date; do
               echo "- **$name**, $date: [${from:0:12}...${to:0:12}](https://github.com/$repo/compare/$from...$to)"
@@ -89,5 +92,3 @@ jobs:
           else
             gh pr create --base "$BASE" --head "$BRANCH" --title "flake.lock: update inputs" --body-file "$RUNNER_TEMP/body.md"
           fi
-          # Pushes made with this workflow's token start no other workflows.
-          gh workflow run check.yaml --ref "$BRANCH"
