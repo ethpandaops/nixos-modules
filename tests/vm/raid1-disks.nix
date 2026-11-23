@@ -1,5 +1,6 @@
 # Install the raid1-disks layout with disko onto two blank disks, boot the
-# result in BIOS or UEFI mode, and check both arrays came up.
+# result in BIOS or UEFI mode, and check both arrays came up. Like
+# nixos-anywhere, the installer runs the newest kernel.
 {
   self,
   pkgs,
@@ -22,8 +23,10 @@ diskoLib.testLib.makeDiskoTest {
     "/dev/disk/by-id/disk-a"
     "/dev/disk/by-id/disk-b"
   ];
+  extraInstallerConfig.boot.kernelPackages = pkgs.linuxPackages_latest;
   extraSystemConfig = {
     imports = [ self.nixosModules.raid1-disks ];
+    boot.kernelPackages = pkgs.linuxPackages_latest;
     # The harness sets these per firmware mode; the module installs for both
     # in either mode, which is what this test checks.
     boot.loader.grub.efiSupport = pkgs.lib.mkForce true;

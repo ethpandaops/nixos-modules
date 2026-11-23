@@ -43,6 +43,22 @@ in
   raid1-disks-uefi = raid1Test true;
   comin-ssh = vmTest ./vm/comin-ssh.nix;
 
+  # raid1-disks refuses a kernel that can't assemble arrays made by a newer one.
+  raid1-rejects-old-kernel =
+    let
+      failed =
+        lib.filter (a: !a.assertion)
+          (server.extendModules {
+            modules = [ { boot.kernelPackages = lib.mkForce pkgs.linuxPackages_6_18; } ];
+          }).config.assertions;
+    in
+    pkgs.runCommand "raid1-rejects-old-kernel" { } (
+      if lib.any (a: lib.hasInfix "can't assemble md arrays" a.message) failed then
+        "touch $out"
+      else
+        "echo 'raid1-disks accepted a 6.18 kernel'; exit 1"
+    );
+
   formatting = pkgs.runCommand "formatting" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
     cd ${self}
     find . -name '*.nix' -print0 | xargs -0 nixfmt --check

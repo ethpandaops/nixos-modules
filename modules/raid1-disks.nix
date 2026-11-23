@@ -4,6 +4,12 @@
 # to every disk for BIOS and to the ESP's removable path for UEFI, so the
 # server boots in either firmware mode and from either disk alone.
 # mdadm events go to the admins through nixhost-notify.
+#
+# Needs a 6.19 or newer kernel. Since 6.19 (upstream commit a4166f1c4893) a
+# new array records its logical block size in the v1 superblock, and older
+# kernels reject every member of such an array. Installers such as
+# nixos-anywhere's run a newer kernel than NixOS's default, so a server
+# booting the default kernel would never find its root array.
 {
   config,
   lib,
@@ -33,6 +39,15 @@ in
       {
         assertion = builtins.length cfg.disks >= 2;
         message = "ethpandaops.raid1.disks needs at least two disks.";
+      }
+      {
+        assertion = lib.versionAtLeast config.boot.kernelPackages.kernel.version "6.19";
+        message = ''
+          ethpandaops.raid1: kernel ${config.boot.kernelPackages.kernel.version} can't assemble md arrays
+          created by a 6.19 or newer kernel, such as the one in nixos-anywhere's installer, so the
+          server wouldn't find its root array at boot. Use a newer kernel, for example
+          boot.kernelPackages = pkgs.linuxPackages_latest;
+        '';
       }
     ];
 

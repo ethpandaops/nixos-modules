@@ -1,10 +1,12 @@
 # A complete server using every module, with placeholder values, so the
 # modules are checked together the way a real configuration uses them.
-{ config, ... }:
+{ config, pkgs, ... }:
 {
   networking.hostName = "example";
   nixpkgs.hostPlatform = "x86_64-linux";
   system.stateVersion = "26.05";
+  # raid1-disks needs 6.19 or newer.
+  boot.kernelPackages = pkgs.linuxPackages_latest;
 
   ethpandaops = {
     network = {
