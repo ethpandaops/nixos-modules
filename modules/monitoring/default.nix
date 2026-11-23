@@ -15,6 +15,7 @@ in
   imports = [
     ../metrics.nix
     ./drift.nix
+    ./logs.nix
   ];
 
   options.ethpandaops.monitoring = {

@@ -46,6 +46,7 @@ in
   health-check = vmTest ./vm/health-check.nix;
   monitoring = vmTest ./vm/monitoring.nix;
   drift = vmTest ./vm/drift.nix;
+  logs = vmTest ./vm/logs.nix;
   raid1-disks-bios = raid1Test false;
   raid1-disks-uefi = raid1Test true;
   comin-ssh = vmTest ./vm/comin-ssh.nix;
