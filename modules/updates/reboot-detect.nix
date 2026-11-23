@@ -20,6 +20,7 @@ let
     name = "nixhost-reboot-detect";
     runtimeInputs = with pkgs; [
       coreutils
+      diffutils
       jq
     ];
     text = ''
@@ -38,9 +39,10 @@ in
       "kernel"
       "initrd"
       "kernel-modules"
+      "kernel-params"
       "systemd"
     ];
-    description = "Links in the system closure that need a reboot when they change.";
+    description = "Parts of the system that need a reboot when they change: links, compared by target, or files, such as kernel-params, compared by content.";
   };
 
   config = {
