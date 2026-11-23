@@ -35,13 +35,28 @@ let
       )
     );
 
+  # initrd SSH host keys kept in /etc, as installers copy them there: not in
+  # the system's /etc, but configured.
+  initrdHostKeys =
+    lib.concatMap
+      (key: [
+        key
+        "${key}.pub"
+      ])
+      (
+        map (lib.removePrefix "/etc/") (
+          lib.filter (lib.hasPrefix "/etc/") (map toString config.boot.initrd.network.ssh.hostKeys)
+        )
+      );
+
   settings = pkgs.writeText "nixhost-drift.json" (
     builtins.toJSON {
       users = lib.mapAttrsToList (_: user: user.name) (
         lib.filterAttrs (_: user: user.enable or true) config.users.users
       );
       groups = lib.genAttrs cfg.groups membersOf;
-      inherit (cfg) etcDirs etcIgnore;
+      inherit (cfg) etcDirs;
+      etcIgnore = cfg.etcIgnore ++ initrdHostKeys;
       comin = config.services.comin.enable or false;
       # The branch deployed with switch, whose system is also the boot default.
       deployBranch =
@@ -123,7 +138,7 @@ in
     etcIgnore = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ "ssh/ssh_host_*" ];
-      description = "Paths under /etc (shell globs) that change at runtime by design.";
+      description = "Paths under /etc (shell globs) that change at runtime by design. initrd SSH host keys under /etc are ignored too.";
     };
   };
 

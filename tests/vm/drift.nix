@@ -28,6 +28,8 @@ in
       healthCheck.enable = false;
     };
     services.comin.enable = lib.mkForce false;
+    # Configured, but not in the system's /etc (the test creates them).
+    boot.initrd.network.ssh.hostKeys = [ "/etc/ssh/initrd_ssh_host_ed25519_key" ];
     # Activation is part of the test.
     system.switch.enable = true;
     ethpandaops.users = {
@@ -90,6 +92,7 @@ in
     ssh = "ssh -n -o StrictHostKeyChecking=no -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=10"
 
     with subtest("a box as configured reports no drift"):
+        server.succeed("touch /etc/ssh/initrd_ssh_host_ed25519_key /etc/ssh/initrd_ssh_host_ed25519_key.pub")
         out = metrics("nixhost-drift")
         for check in checks:
             assert value(out, f"nixhost_drift_{check}") == 0, out
