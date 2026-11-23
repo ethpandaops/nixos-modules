@@ -42,5 +42,11 @@ diskoLib.testLib.makeDiskoTest {
     machine.succeed("mountpoint /boot")
     machine.succeed("grep -A1 '^md' /proc/mdstat | grep -q '\\[UU\\]'")
     machine.succeed("findmnt -n -o SOURCE / | grep -q '^/dev/md'")
+    # mdadm alerts reach nixhost-notify. mdadm uses the first PROGRAM line;
+    # the test harness adds one of its own after ours.
+    machine.succeed("test \"$(awk '/^PROGRAM/ {print $2; exit}' /etc/mdadm.conf)\" = /run/current-system/sw/bin/nixhost-mdadm-event")
+    machine.succeed("test -x /run/current-system/sw/bin/nixhost-mdadm-event")
+    machine.succeed("mdadm --monitor --scan --oneshot --test")
+    machine.wait_until_succeeds("journalctl -t nixhost-notify | grep -q 'mdadm: TestMessage on /dev/md'")
   '';
 }
