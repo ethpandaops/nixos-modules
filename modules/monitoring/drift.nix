@@ -6,6 +6,8 @@
 #   sensitive /etc directories that it doesn't have;
 # - authorized_keys files in home directories (sshd ignores them here);
 # - comin still running with an older unit than the installed one;
+# - sockets listening beyond loopback on ports the configuration doesn't open,
+#   and changes to the NixOS firewall's rules since activation;
 # - a running or boot system other than the one the last deployment recorded,
 #   as after a health-check rollback;
 # - SSH logins, by whether the key is one the configuration pins.
@@ -71,6 +73,22 @@ let
     else
       null;
 
+  fw = config.networking.firewall;
+  # proto:port and proto:from-to the firewall opens (everywhere or on one
+  # interface), and sshd's ports: what may listen beyond loopback.
+  openPorts =
+    proto:
+    let
+      sets = [ fw ] ++ lib.attrValues fw.interfaces;
+    in
+    map (port: "${lib.toLower proto}:${toString port}") (
+      lib.concatMap (set: set."allowed${proto}Ports") sets
+      ++ lib.optionals (proto == "TCP" && config.services.openssh.enable) config.services.openssh.ports
+    )
+    ++ map (range: "${lib.toLower proto}:${toString range.from}-${toString range.to}") (
+      lib.concatMap (set: set."allowed${proto}PortRanges") sets
+    );
+
   settings = pkgs.writeText "nixhost-drift.json" (
     builtins.toJSON {
       users = lib.mapAttrsToList (_: user: user.name) (
@@ -81,6 +99,36 @@ let
       etcIgnore = cfg.etcIgnore ++ initrdHostKeys;
       comin = config.services.comin.enable or false;
       inherit bootLoader;
+      listen = {
+        # Plus the DHCP clients' and the mDNS responder's sockets, which
+        # systemd-networkd and systemd-resolved open whatever the firewall says.
+        allowed = lib.unique (
+          openPorts "TCP"
+          ++ openPorts "UDP"
+          ++ [
+            "udp:68"
+            "udp:546"
+            "udp:5353"
+          ]
+          ++ cfg.listeners.allowed
+        );
+        inherit (cfg.listeners) ignoreProcesses;
+      };
+      # NixOS's own rules: the iptables firewall's nixos-fw* chains and the
+      # INPUT and PREROUTING jumps, or the nftables firewall's table.
+      firewall =
+        if !fw.enable then
+          null
+        else if config.networking.nftables.enable then
+          {
+            kind = "nftables";
+            unit = "nftables.service";
+          }
+        else
+          {
+            kind = "iptables";
+            unit = "firewall.service";
+          };
       # The branch deployed with switch, whose system is also the boot default.
       deployBranch =
         if config.ethpandaops.deploy.enable or false then config.ethpandaops.deploy.branch else null;
@@ -107,9 +155,11 @@ let
       diffutils
       gawk
       gnugrep
+      iproute2
       jq
       systemd
     ]
+    ++ lib.optional fw.enable (if config.networking.nftables.enable then nftables else fw.package)
   );
   sshLogins = script "nixhost-ssh-logins" "" ./ssh-logins.sh (
     with pkgs;
@@ -162,6 +212,22 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ "ssh/ssh_host_*" ];
       description = "Paths under /etc (shell globs) that change at runtime by design. initrd SSH host keys under /etc are ignored too.";
+    };
+    listeners = {
+      allowed = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        example = [
+          "tcp:8080"
+          "udp:5353"
+        ];
+        description = "Ports (proto:port or proto:from-to) that may listen beyond loopback besides those the firewall opens, sshd's, and the DHCP clients' and mDNS responder's (udp:68, udp:546, udp:5353).";
+      };
+      ignoreProcesses = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "tailscaled" ];
+        description = "Processes whose listening sockets aren't reported. tailscaled listens on changing ports on its tailnet address.";
+      };
     };
   };
 
