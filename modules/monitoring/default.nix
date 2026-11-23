@@ -12,7 +12,10 @@ let
   ts = cfg.tailscale;
 in
 {
-  imports = [ ../metrics.nix ];
+  imports = [
+    ../metrics.nix
+    ./drift.nix
+  ];
 
   options.ethpandaops.monitoring = {
     nodeExporterPort = lib.mkOption {

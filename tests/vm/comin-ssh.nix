@@ -22,7 +22,9 @@ in
       imports = [
         self.nixosModules.base
         self.nixosModules.deploy
+        self.nixosModules.monitoring
       ];
+      ethpandaops.monitoring.tailscale.enable = false;
       ethpandaops.deploy = {
         repository = "ssh://git@gitserver/srv/config.git";
         knownHostsFile = "/var/lib/test-known-hosts";
@@ -56,5 +58,24 @@ in
     with subtest("the lag check reads the same remote with OpenSSH"):
         machine.succeed("systemctl start nixhost-deploy-lag.service")
         machine.succeed("grep -qx 'nixhost_deploy_upstream_check_ok 1' /var/lib/node-exporter/nixhost_deploy.prom")
+
+    with subtest("the drift check notices comin running with an older --config"):
+        machine.succeed("systemctl start nixhost-drift.service")
+        machine.succeed("grep -qx 'nixhost_comin_config_stale 0' /var/lib/node-exporter/nixhost_drift.prom")
+        # What a manual switch leaves behind: a new unit that comin isn't restarted into.
+        execstart = machine.succeed("systemctl show -p ExecStart --value comin.service")
+        binary = execstart.split("argv[]=")[1].split()[0]
+        machine.succeed(
+            "mkdir -p /run/systemd/system/comin.service.d",
+            f"printf '[Service]\\nExecStart=\\nExecStart={binary} run --config /nix/store/00000000000000000000000000000000-new-comin.yaml\\n' > /run/systemd/system/comin.service.d/newer.conf",
+            "systemctl daemon-reload",
+            "systemctl start nixhost-drift.service",
+        )
+        machine.succeed("grep -qx 'nixhost_comin_config_stale 1' /var/lib/node-exporter/nixhost_drift.prom")
+        machine.succeed("grep -q '^nixhost_comin_config_stale_since_timestamp_seconds ' /var/lib/node-exporter/nixhost_drift.prom")
+        # Restarting comin into the installed unit clears it.
+        machine.succeed("rm -r /run/systemd/system/comin.service.d && systemctl daemon-reload && systemctl restart comin.service")
+        machine.succeed("systemctl start nixhost-drift.service")
+        machine.succeed("grep -qx 'nixhost_comin_config_stale 0' /var/lib/node-exporter/nixhost_drift.prom")
   '';
 }
