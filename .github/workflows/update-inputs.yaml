@@ -1,0 +1,93 @@
+# Weekly: update every flake input (nixpkgs on its release branch, srvos,
+# comin, disko, sops-nix) and open or refresh one pull request with the
+# changes and links to each upstream diff. Merge it once `check` passes.
+#
+# Needs "Allow GitHub Actions to create and approve pull requests" in the
+# repository's Actions settings.
+name: update-inputs
+on:
+  schedule:
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: update-inputs
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write # to start check.yaml on the update branch
+    env:
+      BRANCH: update-inputs
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+      - name: Update flake.lock
+        id: update
+        run: |
+          base=$(gh api "repos/$GH_REPO" --jq .default_branch)
+          if [ "$GITHUB_REF_NAME" != "$base" ]; then
+            echo "::error::Run this on $base, not $GITHUB_REF_NAME."
+            exit 1
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          open_pr=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+
+          cp flake.lock "$RUNNER_TEMP/old.lock"
+          nix flake update
+          if git diff --quiet flake.lock; then
+            echo "Every input is current."
+            if [ -n "$open_pr" ]; then
+              gh pr close "$open_pr" --comment "Every input on $base is current; nothing to update."
+            fi
+            exit 0
+          fi
+
+          # One line per changed input: name, owner/repo, old rev, new rev, date.
+          jq -r --slurpfile old "$RUNNER_TEMP/old.lock" '
+            .nodes | to_entries[]
+            | select(.value.locked.type? == "github")
+            | ($old[0].nodes[.key].locked.rev // "") as $from
+            | select($from != .value.locked.rev)
+            | [.key, "\(.value.locked.owner)/\(.value.locked.repo)", $from, .value.locked.rev,
+               (.value.locked.lastModified | todate | .[0:10])]
+            | @tsv' flake.lock > "$RUNNER_TEMP/changes.tsv"
+          {
+            echo "flake.lock: update inputs"
+            echo
+            while IFS=$'\t' read -r name repo from to date; do
+              echo "- $name: ${from:0:12}..${to:0:12} ($date)"
+            done < "$RUNNER_TEMP/changes.tsv"
+          } > "$RUNNER_TEMP/message"
+          {
+            echo "Weekly update of the flake inputs. Merge once \`check\` passes."
+            echo
+            while IFS=$'\t' read -r name repo from to date; do
+              echo "- **$name**, $date: [${from:0:12}...${to:0:12}](https://github.com/$repo/compare/$from...$to)"
+            done < "$RUNNER_TEMP/changes.tsv"
+          } > "$RUNNER_TEMP/body.md"
+          cat "$RUNNER_TEMP/message"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "open_pr=$open_pr" >> "$GITHUB_OUTPUT"
+      - name: Open or refresh the pull request
+        if: steps.update.outputs.changed == 'true'
+        env:
+          BASE: ${{ steps.update.outputs.base }}
+          OPEN_PR: ${{ steps.update.outputs.open_pr }}
+        run: |
+          git switch -q -C "$BRANCH"
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -F "$RUNNER_TEMP/message" flake.lock
+          git push -q --force origin "HEAD:refs/heads/$BRANCH"
+          if [ -n "$OPEN_PR" ]; then
+            gh pr edit "$OPEN_PR" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --base "$BASE" --head "$BRANCH" --title "flake.lock: update inputs" --body-file "$RUNNER_TEMP/body.md"
+          fi
+          # Pushes made with this workflow's token start no other workflows.
+          gh workflow run check.yaml --ref "$BRANCH"
