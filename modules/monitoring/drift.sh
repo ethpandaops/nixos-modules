@@ -141,19 +141,42 @@ fi
 # a manual switch or a manual boot change leaves them apart, while comin and
 # deployed.json still report the deployment.
 deployed_file=/var/lib/nixhost-deploy/deployed.json
+
+# boot_default: the system the bootloader's default entry boots (its
+# init=/nix/store/<system>/init), or nothing if that can't be read.
+init_system() {
+  awk 'match($0, /init=\/nix\/store\/[^ ]*\/init/) { print substr($0, RSTART + 5, RLENGTH - 10); exit }'
+}
+boot_default() {
+  case $(jq -r '.bootLoader.kind // empty' "$SETTINGS") in
+  grub) init_system <"$(jq -r '.bootLoader.config' "$SETTINGS")" ;;
+  systemd-boot) bootctl list --json=short | jq -r 'first(.[] | select(.isDefault)) | .options // empty' | init_system ;;
+  esac
+}
+
 want=""
 [ ! -r "$deployed_file" ] || want=$(jq -r '.system // empty' "$deployed_file")
 if [ -n "$want" ]; then
   want=$(readlink -f "$want" || echo "$want")
-  boot=$(readlink -f /nix/var/nix/profiles/system || true)
+  boot=$(boot_default 2>/dev/null || true)
   ref=$(jq -r '.ref // empty' "$deployed_file")
   branch=$(jq -r '.deployBranch // empty' "$SETTINGS")
+  # comin switches first and the deploy hook writes deployed.json after, so
+  # an older deployed.json just after an activation is a deployment in
+  # progress, not drift: leave the comparison to a later run.
+  activated=$(stat -c %Y /run/current-system)
+  settling=""
+  if [ "$(stat -c %Y "$deployed_file")" -lt "$activated" ] && [ $((now - activated)) -lt 300 ]; then
+    settling=1
+  fi
   {
-    echo "# HELP nixhost_deploy_running_matches_deployed Whether the running system is the one the last deployment recorded."
-    echo "# TYPE nixhost_deploy_running_matches_deployed gauge"
-    echo "nixhost_deploy_running_matches_deployed $([ "$current" = "$want" ] && echo 1 || echo 0)"
+    if [ -z "$settling" ]; then
+      echo "# HELP nixhost_deploy_running_matches_deployed Whether the running system is the one the last deployment recorded."
+      echo "# TYPE nixhost_deploy_running_matches_deployed gauge"
+      echo "nixhost_deploy_running_matches_deployed $([ "$current" = "$want" ] && echo 1 || echo 0)"
+    fi
     # A testing-branch deployment is applied with test and leaves the boot default alone.
-    if [ -n "$branch" ] && [[ $ref == */"$branch" ]]; then
+    if [ -z "$settling" ] && [ -n "$boot" ] && [ -n "$branch" ] && [[ $ref == */"$branch" ]]; then
       echo "# HELP nixhost_deploy_boot_matches_deployed Whether the boot default is the system the last deployment recorded."
       echo "# TYPE nixhost_deploy_boot_matches_deployed gauge"
       echo "nixhost_deploy_boot_matches_deployed $([ "$boot" = "$want" ] && echo 1 || echo 0)"

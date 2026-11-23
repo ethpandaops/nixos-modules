@@ -49,6 +49,28 @@ let
         )
       );
 
+  # Where the bootloader's default entry names its system. GRUB's first entry
+  # (default 0) and systemd-boot's default are the system the last
+  # switch-to-configuration switch or boot installed, whichever profile it
+  # came from; comin switches with its own profile, so
+  # /nix/var/nix/profiles/system is no guide.
+  grub = config.boot.loader.grub;
+  bootLoader =
+    if config.boot.loader.systemd-boot.enable then
+      { kind = "systemd-boot"; }
+    else if
+      grub.enable
+      && toString grub.default == "0"
+      && !grub.extraEntriesBeforeNixOS
+      && grub.mirroredBoots != [ ]
+    then
+      {
+        kind = "grub";
+        config = "${(lib.head grub.mirroredBoots).path}/grub/grub.cfg";
+      }
+    else
+      null;
+
   settings = pkgs.writeText "nixhost-drift.json" (
     builtins.toJSON {
       users = lib.mapAttrsToList (_: user: user.name) (
@@ -58,6 +80,7 @@ let
       inherit (cfg) etcDirs;
       etcIgnore = cfg.etcIgnore ++ initrdHostKeys;
       comin = config.services.comin.enable or false;
+      inherit bootLoader;
       # The branch deployed with switch, whose system is also the boot default.
       deployBranch =
         if config.ethpandaops.deploy.enable or false then config.ethpandaops.deploy.branch else null;

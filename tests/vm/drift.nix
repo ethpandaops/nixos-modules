@@ -99,10 +99,19 @@ in
         assert "nixhost_comin_config_stale" not in out, out
 
     with subtest("a login with a pinned key counts as known"):
+        # Counts from an earlier run: a seed for a key file's metadata (as the
+        # first version wrote) and logins by a user without a key file.
+        server.succeed(
+            "install -d -m 700 /var/lib/nixhost-drift",
+            "printf '%s\\n' 'alice.mode known 0' 'alice.mode unknown 0' 'carol unknown 2' > /var/lib/nixhost-drift/ssh-logins",
+        )
         client.succeed(f"{ssh} -i /root/key alice@server true")
         out = wait_logins('nixhost_ssh_logins_total{user="alice",key="known"}', 1)
         assert value(out, 'nixhost_ssh_logins_total{user="alice",key="unknown"}') == 0, out
         assert value(out, 'nixhost_ssh_logins_total{user="bob",key="unknown"}') == 0, out
+        assert value(out, 'nixhost_ssh_logins_total{user="carol",key="unknown"}') == 2, out
+        users = set(re.findall(r'^nixhost_ssh_logins_total\{user="([^"]*)"', out, re.M))
+        assert users == {"alice", "bob", "carol"}, out
         # Each run counts only what is new.
         out = metrics("nixhost-ssh-logins")
         assert value(out, 'nixhost_ssh_logins_total{user="alice",key="known"}') == 1, out
@@ -148,9 +157,22 @@ in
             return metrics("nixhost-drift")
 
         def boot(system):
-            server.succeed(f"mkdir -p /nix/var/nix/profiles && ln -sfn {system} /nix/var/nix/profiles/system")
+            # GRUB's default entry first, as switch-to-configuration writes it.
+            server.succeed(
+                "mkdir -p /boot/grub",
+                f"printf '%s\\n' 'menuentry \"NixOS\" {{' '  linux /kernels/bzImage init={system}/init loglevel=4' '}}'"
+                + " 'menuentry \"older\" {' '  linux /kernels/bzImage init=/nix/store/older-system/init' '}' > /boot/grub/grub.cfg",
+            )
 
+        # No bootloader configuration to read: no boot check.
+        server.succeed("rm -f /boot/grub/grub.cfg")
+        out = deployed(current)
+        assert value(out, "nixhost_deploy_running_matches_deployed") == 1, out
+        assert "nixhost_deploy_boot_matches_deployed" not in out, out
         boot(current)
+        # comin switches with its own profile and never moves the system
+        # profile; the bootloader's default entry is what boots.
+        server.succeed(f"mkdir -p /nix/var/nix/profiles && ln -sfn {other} /nix/var/nix/profiles/system")
         out = deployed(current)
         assert value(out, "nixhost_deploy_running_matches_deployed") == 1, out
         assert value(out, "nixhost_deploy_boot_matches_deployed") == 1, out
@@ -158,6 +180,22 @@ in
         out = deployed(other)
         assert value(out, "nixhost_deploy_running_matches_deployed") == 0, out
         assert value(out, "nixhost_deploy_boot_matches_deployed") == 0, out
+        # Mid-deployment: just activated, and deployed.json not yet rewritten.
+        server.succeed(
+            "touch -h /run/current-system",
+            "touch -d @$(($(stat -c %Y /run/current-system) - 60)) /var/lib/nixhost-deploy/deployed.json",
+        )
+        out = metrics("nixhost-drift")
+        assert "nixhost_deploy_running_matches_deployed" not in out, out
+        assert "nixhost_deploy_boot_matches_deployed" not in out, out
+        assert "nixhost_deploy_system_info{" in out, out
+        # Still older once the activation is 5 minutes past: drift.
+        server.succeed(
+            "touch -h -d '-10 min' /run/current-system",
+            "touch -d '-20 min' /var/lib/nixhost-deploy/deployed.json",
+        )
+        out = metrics("nixhost-drift")
+        assert value(out, "nixhost_deploy_running_matches_deployed") == 0, out
         # A testing-branch deployment doesn't change the boot default.
         boot(other)
         out = deployed(current, ref="origin/testing-server")
