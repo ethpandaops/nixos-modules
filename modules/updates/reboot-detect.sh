@@ -25,7 +25,10 @@ changed=()
 for component in "${COMPONENTS[@]}"; do
   booted=$(readlink -f "/run/booted-system/$component" || true)
   current=$(readlink -f "/run/current-system/$component" || true)
-  if [ "$booted" != "$current" ]; then
+  # A file in the system itself, such as kernel-params, is in each system's
+  # own store path, so compare what it says.
+  if [ "$booted" != "$current" ] &&
+    ! { [ -f "$booted" ] && [ -f "$current" ] && cmp -s "$booted" "$current"; }; then
     changed+=("$component")
   fi
 done

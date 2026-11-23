@@ -84,6 +84,24 @@ in
         machine.succeed("test ! -e /run/reboot-required")
         assert "No reboot pending" in machine.succeed("reboot-status")
 
+    with subtest("a kernel parameter change needs a reboot"):
+        machine.succeed(
+            "mkdir -p /tmp/params-system",
+            "for f in /run/booted-system/*; do ln -sfn $(readlink -f $f) /tmp/params-system/$(basename $f); done",
+            "rm /tmp/params-system/kernel-params",
+            "echo \"$(cat /run/booted-system/kernel-params) audit=1\" > /tmp/params-system/kernel-params",
+            "ln -sfn /tmp/params-system /run/current-system",
+            "systemctl start nixhost-reboot-detect.service",
+        )
+        assert machine.succeed("cat /run/reboot-required.components").split() == ["kernel-params"]
+        # A system with the same parameters in its own file needs none.
+        machine.succeed(
+            "cp --remove-destination /run/booted-system/kernel-params /tmp/params-system/kernel-params",
+            "systemctl start nixhost-reboot-detect.service",
+            "test ! -e /run/reboot-required",
+            "ln -sfn $(readlink -f /run/booted-system) /run/current-system",
+        )
+
     with subtest("a kernel change is detected and announced"):
         machine.succeed("date -u -s '2030-01-01 00:00:00'")
         fake_kernel_update()
