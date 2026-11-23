@@ -148,9 +148,22 @@ in
             return metrics("nixhost-drift")
 
         def boot(system):
-            server.succeed(f"mkdir -p /nix/var/nix/profiles && ln -sfn {system} /nix/var/nix/profiles/system")
+            # GRUB's default entry first, as switch-to-configuration writes it.
+            server.succeed(
+                "mkdir -p /boot/grub",
+                f"printf '%s\\n' 'menuentry \"NixOS\" {{' '  linux /kernels/bzImage init={system}/init loglevel=4' '}}'"
+                + " 'menuentry \"older\" {' '  linux /kernels/bzImage init=/nix/store/older-system/init' '}' > /boot/grub/grub.cfg",
+            )
 
+        # No bootloader configuration to read: no boot check.
+        server.succeed("rm -f /boot/grub/grub.cfg")
+        out = deployed(current)
+        assert value(out, "nixhost_deploy_running_matches_deployed") == 1, out
+        assert "nixhost_deploy_boot_matches_deployed" not in out, out
         boot(current)
+        # comin switches with its own profile and never moves the system
+        # profile; the bootloader's default entry is what boots.
+        server.succeed(f"mkdir -p /nix/var/nix/profiles && ln -sfn {other} /nix/var/nix/profiles/system")
         out = deployed(current)
         assert value(out, "nixhost_deploy_running_matches_deployed") == 1, out
         assert value(out, "nixhost_deploy_boot_matches_deployed") == 1, out
