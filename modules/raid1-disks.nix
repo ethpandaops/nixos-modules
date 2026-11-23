@@ -19,7 +19,7 @@
 }:
 let
   cfg = config.ethpandaops.raid1;
-  mdadmEvent = pkgs.writeShellScript "nixhost-mdadm-event" ''
+  mdadmEvent = pkgs.writeShellScriptBin "nixhost-mdadm-event" ''
     exec ${lib.getExe config.ethpandaops.notify.package} admins "mdadm: $1 on $2 ''${3:-}"
   '';
 in
@@ -56,9 +56,15 @@ in
 
     boot.kernelPackages = lib.mkDefault pkgs.linuxPackages_latest;
 
+    # mdadm.conf is also copied into the initrd, so PROGRAM names a stable
+    # path rather than the script's store path: otherwise every change to
+    # nixhost-notify would change the initrd and ask for a reboot. Nothing
+    # runs PROGRAM in the initrd. mdadm uses the first PROGRAM line, so this
+    # one goes first.
+    environment.systemPackages = [ mdadmEvent ];
     boot.swraid = {
       enable = true;
-      mdadmConf = "PROGRAM ${mdadmEvent}";
+      mdadmConf = lib.mkBefore "PROGRAM /run/current-system/sw/bin/nixhost-mdadm-event";
     };
     # systemd-boot can't install to an ESP on mdadm; GRUB can.
     boot.loader.systemd-boot.enable = false;
