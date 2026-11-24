@@ -1,7 +1,7 @@
 # A local webhook that appends "<path> <body>" for every POST to
 # /var/lib/notify-sink.log, so tests can see what nixhost-notify sent. Like
-# Discord, paths under /api/webhooks/ want {"content": ...}, or
-# {"text": ...} when they end in /slack, and answer 400 otherwise.
+# Discord, paths under /api/webhooks/ want "content" or "embeds", or "text"
+# or "attachments" when they end in /slack, and answer 400 otherwise.
 { pkgs, ... }:
 {
   systemd.services.notify-sink = {
@@ -15,8 +15,8 @@
               with open("/var/lib/notify-sink.log", "ab") as log:
                   log.write(self.path.encode() + b" " + body + b"\n")
               if self.path.startswith("/api/webhooks/"):
-                  field = "text" if self.path.endswith("/slack") else "content"
-                  if field not in json.loads(body):
+                  fields = ("text", "attachments") if self.path.endswith("/slack") else ("content", "embeds")
+                  if not any(json.loads(body).get(f) for f in fields):
                       self.send_response(400)
                       self.end_headers()
                       self.wfile.write(b'{"message": "Cannot send an empty message", "code": 50006}')

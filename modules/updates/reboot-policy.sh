@@ -101,8 +101,11 @@ countdown() {
   reboot_regardless
 }
 
+# notify_users <critical|warning|info|ok> <title> <message>
 notify_users() {
-  "$NOTIFY" users "$*" || true
+  local severity=$1 title=$2
+  shift 2
+  "$NOTIFY" --severity "$severity" --title "$title" users "$*" || true
 }
 
 # remember <file> <value>: true the first time a value is seen, so each notice goes out once.
@@ -173,7 +176,7 @@ policy() {
   # Back from a reboot this policy started: say so once.
   if [ -r "$STATE/rebooting.json" ]; then
     if [ "$(jq -r .boot "$STATE/rebooting.json")" != "$(cat /proc/sys/kernel/random/boot_id)" ]; then
-      notify_users "The box is back after its reboot ($(jq -r .reason "$STATE/rebooting.json")), running kernel $(uname -r)."
+      notify_users ok "Back after a reboot" "The box is back after its reboot ($(jq -r .reason "$STATE/rebooting.json")), running kernel $(uname -r)."
       rm -f "$STATE/rebooting.json"
     fi
   fi
@@ -209,7 +212,7 @@ policy() {
   hold=$(readnum "$RUN/hold-until")
   hold_by=$(cat "$RUN/hold-by" 2>/dev/null || echo someone)
   if [ "$hold" -gt 0 ] && [ "$hold" -le "$now" ]; then
-    notify_users "The reboot hold set by $hold_by has expired."
+    notify_users info "Reboot hold expired" "The reboot hold set by $hold_by has expired."
     rm -f "$RUN/hold-until" "$RUN/hold-by"
     hold=0
   fi
@@ -261,7 +264,8 @@ policy() {
       systemd-run --quiet --unit=nixhost-deadline-reboot --description="Reboot at the update deadline" \
         "$(readlink -f "$0")" countdown "$scheduled"
       wall "This box reboots at $(fmt "$scheduled") to finish an update: the deadline has passed. Save your work."
-      "$NOTIFY" all "Deadline reached: rebooting at $(fmt "$scheduled") to finish an update. ${what}." || true
+      "$NOTIFY" --severity warning --title "Rebooting at the deadline" all \
+        "Deadline reached: rebooting at $(fmt "$scheduled") to finish an update. ${what}." || true
     elif [ "$at" -gt 0 ] && [ "$now" -ge "$at" ]; then
       reason="the time $at_by chose with reboot-at"
     elif [ "$paused" = 0 ] && [ "$supervised" = 0 ] && [ "$now" -ge "$((since + $(setting minDelay)))" ] &&
@@ -273,7 +277,7 @@ policy() {
     if [ -n "$reason" ]; then
       echo "rebooting now: $reason"
       record_reboot "$reason"
-      notify_users "Rebooting now ($reason) to finish an update. ${what}."
+      notify_users warning "Rebooting now" "Rebooting now ($reason) to finish an update. ${what}."
       if [ "$at" -gt 0 ] && [ "$now" -ge "$at" ]; then
         reboot_regardless
       else
@@ -332,21 +336,22 @@ policy() {
   # One-time notices.
   if remember notified-pending "$since"; then
     if [ "$supervised" = 1 ]; then
-      notify_users "A reboot is pending. ${what}, so it doesn't happen by itself: an admin will schedule it, and reboot-status on the box shows when."
+      notify_users info "Reboot pending: new kernel series" "A reboot is pending. ${what}, so it doesn't happen by itself: an admin will schedule it, and reboot-status on the box shows when."
     else
-      notify_users "A reboot is pending. ${what}. Planned: $(fmt "$planned"); deadline: $(fmt "$deadline"). Use reboot-hold or reboot-at on the box to choose another time."
+      notify_users info "Reboot pending" "A reboot is pending. ${what}. Planned: $(fmt "$planned"); deadline: $(fmt "$deadline"). Use reboot-hold or reboot-at on the box to choose another time."
     fi
   fi
   if [ "$supervised" = 1 ] && remember notified-supervised "$(jq -r .kernel.new "$RUN/required.json")"; then
-    "$NOTIFY" admins "${what}: it needs a supervised reboot. Run reboot-at or reboot-now on the box while someone with console access is on hand, by $(fmt "$deadline")." || true
+    "$NOTIFY" --severity warning --title "Supervised reboot needed" admins \
+      "${what}: it needs a supervised reboot. Run reboot-at or reboot-now on the box while someone with console access is on hand, by $(fmt "$deadline")." || true
   fi
   if [ "$paused" = 0 ] && [ "$supervised" = 0 ] && [ "$scheduled" -eq 0 ]; then
     if [ "$((deadline - now))" -le 3600 ] && remember notified-1h "$deadline"; then
       wall "This box reboots within an hour ($(fmt "$deadline")) to finish an update. Run reboot-status for details."
-      notify_users "The box reboots within an hour, at $(fmt "$deadline"), to finish an update."
+      notify_users warning "Reboot within an hour" "The box reboots within an hour, at $(fmt "$deadline"), to finish an update."
     elif [ "$((deadline - now))" -le 86400 ] && remember notified-24h "$deadline"; then
       wall "This box reboots by $(fmt "$deadline") to finish an update. Run reboot-status for details."
-      notify_users "The box reboots by $(fmt "$deadline") (the deadline) to finish an update."
+      notify_users info "Reboot within a day" "The box reboots by $(fmt "$deadline") (the deadline) to finish an update."
     fi
   fi
 
@@ -415,7 +420,7 @@ hold() {
   fi
   echo "$held" >"$RUN/hold-until"
   echo "${SUDO_USER:-root}" >"$RUN/hold-by"
-  notify_users "${SUDO_USER:-root} held the reboot until $(fmt "$held")."
+  notify_users info "Reboot held" "${SUDO_USER:-root} held the reboot until $(fmt "$held")."
   refresh
 }
 

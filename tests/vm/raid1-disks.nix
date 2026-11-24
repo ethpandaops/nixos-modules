@@ -47,6 +47,9 @@ diskoLib.testLib.makeDiskoTest {
     machine.succeed("test \"$(awk '/^PROGRAM/ {print $2; exit}' /etc/mdadm.conf)\" = /run/current-system/sw/bin/nixhost-mdadm-event")
     machine.succeed("test -x /run/current-system/sw/bin/nixhost-mdadm-event")
     machine.succeed("mdadm --monitor --scan --oneshot --test")
-    machine.wait_until_succeeds("journalctl -t nixhost-notify | grep -q 'mdadm: TestMessage on /dev/md'")
+    machine.wait_until_succeeds("journalctl -t nixhost-notify | grep -q 'RAID alert test: mdadm: TestMessage on /dev/md'")
+    # Assembling the arrays at boot (NewArray) and rebuild progress aren't news.
+    machine.succeed("nixhost-mdadm-event NewArray /dev/md/root", "nixhost-mdadm-event Rebuild40 /dev/md/root")
+    machine.fail("journalctl -t nixhost-notify | grep -qE 'NewArray|Rebuild40'")
   '';
 }

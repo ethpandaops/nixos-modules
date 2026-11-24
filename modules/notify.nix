@@ -1,6 +1,9 @@
-# nixhost-notify <admins|users|all> <message>: the one way the box tells people
-# something (deploy rollbacks, reboot notices, RAID events). Every message is
-# also logged to the journal. Delivery failures are logged and never fail the
+# nixhost-notify [--severity critical|warning|info|ok] [--title <title>]
+# <admins|users|all> <message>: the one way the box tells people something
+# (deploy rollbacks, reboot notices, RAID events). Each notice posts under the
+# host's name as a Discord embed (or the Slack-compatible equivalent) coloured
+# by severity, with the host, fleet and environment. Every message is also
+# logged to the journal. Delivery failures are logged and never fail the
 # caller.
 {
   config,
@@ -15,6 +18,9 @@ let
   settings = pkgs.writeText "nixhost-notify.json" (
     builtins.toJSON {
       host = config.networking.hostName;
+      # From the monitoring module (ethpandaops.host), when it's imported.
+      fleet = config.ethpandaops.host.fleet or null;
+      environment = config.ethpandaops.host.environment or null;
       admins = cfg.admins;
       users = lib.concatLists (
         lib.mapAttrsToList (name: user: map (t: t // { user = name; }) user.notify) config.ethpandaops.users
@@ -31,61 +37,8 @@ let
       util-linux
     ];
     text = ''
-      settings=${settings}
-      if [ "$#" -lt 2 ]; then
-        echo "usage: nixhost-notify <admins|users|all> <message>" >&2
-        exit 2
-      fi
-      audience=$1
-      shift
-      host=$(jq -r .host "$settings")
-      message="[$host] $*"
-      logger -t nixhost-notify -- "($audience) $message"
-
-      case "$audience" in
-        admins) filter='.admins[]' ;;
-        users) filter='.users[]' ;;
-        all) filter='.admins[], .users[]' ;;
-        *)
-          echo "nixhost-notify: unknown audience $audience" >&2
-          exit 2
-          ;;
-      esac
-
-      jq -c "$filter" "$settings" | while read -r t; do
-        type=$(jq -r .type <<<"$t")
-        url=$(jq -r '.url // empty' <<<"$t")
-        file=$(jq -r '.urlFile // empty' <<<"$t")
-        if [ -z "$url" ] && [ -n "$file" ]; then
-          url=$(tr -d '[:space:]' <"$file" 2>/dev/null) || url=""
-        fi
-        if [ -z "$url" ]; then
-          logger -t nixhost-notify -- "skipping a $type target with no URL"
-          continue
-        fi
-        case "$type" in
-          discord)
-            # A Discord webhook URL ending in /slack is its Slack-compatible endpoint.
-            field=content
-            case "''${url%%\?*}" in */slack) field=text ;; esac
-            body=$(jq -nc --arg m "''${message:0:1900}" --arg f "$field" '{($f): $m}')
-            ctype=application/json
-            ;;
-          webhook) body=$(jq -nc --arg m "$message" '{text: $m}'); ctype=application/json ;;
-          ntfy) body=$message; ctype=text/plain ;;
-        esac
-        # On failure, log curl's error and the start of the reply, on one line.
-        # The URL, often a secret, goes in on stdin rather than in the
-        # command line, which any local user can read.
-        response=$(mktemp)
-        if ! error=$(printf 'url = "%s"\n' "''${url//\"/%22}" | curl -sS --fail-with-body --max-time 15 --retry 3 --retry-delay 5 \
-          -o "$response" -H "Content-Type: $ctype" --data-binary "$body" --config - 2>&1); then
-          reply=$(head -c 300 "$response")
-          logger -t nixhost-notify -- "delivery to a $type target failed: ''${error//$'\n'/ } ''${reply//$'\n'/ }"
-        fi
-        rm -f "$response"
-      done
-      exit 0
+      SETTINGS=${settings}
+      ${builtins.readFile ./notify.sh}
     '';
   };
 in

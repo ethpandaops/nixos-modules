@@ -105,7 +105,7 @@ keep_rollback() {
     "$last_good/bin/switch-to-configuration" boot; }; then
     boot_note=" It could not be made the boot default, so a reboot may start the broken system."
   fi
-  notify_admins "rolled back to $last_good; checks pass again.$boot_note Fix the configuration before the next deploy."
+  notify_admins warning "Deploy rolled back" "Rolled back to $last_good; the checks pass again.$boot_note Fix the configuration before the next deploy."
 }
 
 wait_healthy || true
@@ -118,7 +118,7 @@ if [ -z "$failures" ]; then
   ok=1
   last_success=$now
   if [ "$status" = failed ]; then
-    notify_admins "comin could not deploy ${sha:0:12}: $error. The box is healthy on $current."
+    notify_admins warning "Deploy failed" "comin could not deploy ${sha:0:12}: $error. The box is healthy on $current."
   else
     record_good "$current"
   fi
@@ -126,16 +126,16 @@ else
   echo "checks failed:$failures"
   last_good=$(readlink "$STATE_DIR/last-good" || readlink -f /run/booted-system)
   if [ "$last_good" = "$current" ] || [ ! -x "$last_good/bin/switch-to-configuration" ]; then
-    notify_admins "health check failing ($failures) after deploying ${sha:0:12}, and there is no earlier good system to roll back to."
+    notify_admins critical "Health check failing" "Health check failing (${failures# }) after deploying ${sha:0:12}, and there is no earlier good system to roll back to."
   else
-    notify_admins "health check failed ($failures) after deploying ${sha:0:12}; rolling back to $last_good."
+    notify_admins warning "Health check failed: rolling back" "Health check failed (${failures# }) after deploying ${sha:0:12}; rolling back to $last_good."
     deployed_failures=$failures
     deployed_local=$local_failures
     activate "$last_good"
     if ! wait_healthy; then
       echo "checks fail on $last_good too:$failures; going back to $current"
       activate "$current"
-      notify_admins "health check fails on ${sha:0:12} ($deployed_failures) and on the previous system ($failures), so the deploy isn't the cause; went back to ${sha:0:12}. Check the box and the health check."
+      notify_admins critical "Health check failing, not the deploy" "Health check fails on ${sha:0:12} (${deployed_failures# }) and on the previous system (${failures# }), so the deploy isn't the cause; went back to ${sha:0:12}. Check the box and the health check."
     elif [ -n "$deployed_local" ]; then
       ok=1
       keep_rollback
@@ -146,7 +146,7 @@ else
         ok=1
         last_success=$now
         record_good "$current"
-        notify_admins "health check failed ($deployed_failures) after deploying ${sha:0:12}, but passes on it again: something outside the box, not the deploy. Kept ${sha:0:12}."
+        notify_admins info "Health check recovered" "Health check failed (${deployed_failures# }) after deploying ${sha:0:12}, but passes on it again: something outside the box, not the deploy. Kept ${sha:0:12}."
       else
         echo "checks fail on $current again:$failures; back to $last_good"
         activate "$last_good"
