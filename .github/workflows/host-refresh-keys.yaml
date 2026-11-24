@@ -22,7 +22,7 @@ on:
         type: string
         default: master
       mode:
-        description: push to the branch, or pr to open a pull request
+        description: "push to the branch, or pr: a pull request a person lands as their own signed commit (for nodes that deploy only signed commits)"
         type: string
         default: push
     secrets:

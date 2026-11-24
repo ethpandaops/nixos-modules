@@ -35,7 +35,8 @@ while [ "$#" -gt 0 ]; do
 done
 read -r -a hosts <<<"$build"
 
-placeholders error
+# A pull request lands nothing; a push to the branch deploys.
+[ "$mode" = pr ] || placeholders error
 kernel() {
   [ "${#hosts[@]}" -gt 0 ] || return 0
   nix eval --raw ".#nixosConfigurations.${hosts[0]}.config.boot.kernelPackages.kernel.version"

@@ -39,7 +39,8 @@ if [ -z "${WEBHOOK:-}" ]; then
   echo "::error::Set the KEYS_WEBHOOK secret: key changes aren't deployed without a notice."
   exit 1
 fi
-placeholders error
+# A pull request lands nothing; a push to the branch deploys.
+[ "$mode" = pr ] || placeholders error
 
 work=$(mktemp -d)
 : >"$work/changes"
@@ -108,7 +109,11 @@ if [ -s "$work/changes" ] || [ -s "$work/problems" ]; then
   text=""
   if [ -s "$work/changes" ]; then
     if [ -n "$landed" ]; then
-      text+=$'Changed; they deploy once check passes:\n'"$(cat "$work/changes")"$'\n'
+      if [ "$mode" = pr ]; then
+        text+=$'Changed in a pull request; they deploy once a person lands it:\n'"$(cat "$work/changes")"$'\n'
+      else
+        text+=$'Changed; they deploy once check passes:\n'"$(cat "$work/changes")"$'\n'
+      fi
     else
       text+=$'Changed on GitHub but not committed (the build or push failed):\n'"$(cat "$work/changes")"$'\n'
     fi
