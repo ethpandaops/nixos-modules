@@ -89,7 +89,7 @@ let
     ])
     ++ lib.optional fw.enable (if config.networking.nftables.enable then pkgs.nftables else fw.package)
   );
-  upstreamCheck = script "nixhost-deploy-lag" ./upstream-check.sh common;
+  upstreamCheck = script "nixhost-deploy-lag" ./upstream-check.sh (common ++ [ pkgs.gawk ]);
 in
 {
   imports = [
