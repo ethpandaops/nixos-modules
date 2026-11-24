@@ -57,9 +57,9 @@ while read -r sha committed; do
     new_rev=$sha
     break
   fi
-done < <(gh api "repos/$repo/commits?sha=$default&per_page=30" --jq '.[] | "\(.sha) \(.commit.committer.date)"')
+done < <(gh api "repos/$repo/commits?sha=$default&until=$cutoff&per_page=30" --jq '.[] | "\(.sha) \(.commit.committer.date)"')
 if [ -z "$new_rev" ]; then
-  echo "::warning::no commit on $repo $default with a passing check and $min_age hours old or more among its last 30"
+  echo "::warning::no commit on $repo $default with a passing check among the last 30 that are $min_age hours old or more"
   exit 0
 fi
 if [ "$new_rev" = "$old_rev" ]; then
