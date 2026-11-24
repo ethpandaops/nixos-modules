@@ -25,6 +25,7 @@ in
         self.nixosModules.monitoring
       ];
       ethpandaops.monitoring.tailscale.enable = false;
+      ethpandaops.host.environment = "test";
       ethpandaops.deploy = {
         repository = "ssh://git@gitserver/srv/config.git";
         knownHostsFile = "/var/lib/test-known-hosts";

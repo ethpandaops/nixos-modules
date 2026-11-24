@@ -21,6 +21,7 @@ in
       self.nixosModules.deploy
     ];
     ethpandaops.monitoring.tailscale.enable = false;
+    ethpandaops.host.environment = "test";
     ethpandaops.monitoring.drift.listeners.ignoreProcesses = [ "ignored-listener" ];
     # The deploy module only for deployed.json's place and the branch name.
     ethpandaops.deploy = {

@@ -6,7 +6,8 @@
 #
 # Entries reach the endpoint as OTLP log records: the message as the body,
 # the syslog priority as the severity, the unit, identifier, process and audit
-# fields as attributes, and host.name as a resource attribute. fluent-bit
+# fields as attributes, and host.name, ethpandaops.fleet and
+# deployment.environment (ethpandaops.host) as resource attributes. fluent-bit
 # keeps its place in the journal and buffers on disk while the endpoint is
 # unreachable. nixhost_logs_up and fluent-bit's own counters
 # (fluentbit_output_proc_records_total and others) go to node-exporter.
@@ -121,6 +122,20 @@ in
                   action = "upsert";
                   key = "service.name";
                   value = "journald";
+                }
+                {
+                  name = "content_modifier";
+                  context = "otel_resource_attributes";
+                  action = "upsert";
+                  key = "deployment.environment";
+                  value = config.ethpandaops.host.environment;
+                }
+                {
+                  name = "content_modifier";
+                  context = "otel_resource_attributes";
+                  action = "upsert";
+                  key = "ethpandaops.fleet";
+                  value = config.ethpandaops.host.fleet;
                 }
               ];
             }
