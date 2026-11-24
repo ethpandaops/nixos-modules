@@ -114,8 +114,12 @@ in
         assert value(metrics(), 'nixhost_bpf_loads_total{loader="python3.13",known="false"}') == 1
 
     with subtest("deleting an audit rule or turning auditing off is reported"):
-        # The rule check leaves the 2 minutes after a load or activation alone.
-        server.wait_until_succeeds("[ $(cut -d. -f1 /proc/uptime) -ge 130 ]", timeout=180)
+        # The rule check leaves the 2 minutes after a load or activation alone;
+        # count from when the rules loaded, which varies with the boot.
+        server.wait_until_succeeds(
+            "[ $(( $(cut -d. -f1 /proc/uptime) - $(systemctl show -p ActiveEnterTimestampMonotonic --value audit-rules-nixos) / 1000000 )) -ge 125 ]",
+            timeout=180,
+        )
         server.succeed("touch -h -d '-10 min' /run/current-system")
         out = metrics()
         assert value(out, "nixhost_audit_rules_changed") == 0, out
