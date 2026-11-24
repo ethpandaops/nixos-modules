@@ -1,0 +1,131 @@
+# Kernel tampering, as textfile metrics (nixhost-kernel, every minute):
+# - nixhost_kernel_protection{check}: each protection the configuration turns
+#   on, 1 while in force: kernel module loading off (lockKernelModules), kexec
+#   off (protectKernelImage), the kernel command line's nohibernate and
+#   audit=1, and the audit system enabled. A command-line protection that the
+#   booted system didn't have yet is nixhost_kernel_protection_pending until
+#   the reboot.
+# - nixhost_audit_rules_changed{,_info}: audit rules added or deleted since
+#   audit-rules-nixos loaded them, nixhost_audit_lost and nixhost_audit_backlog:
+#   how someone would hide what the audit rules record.
+# - nixhost_bpf_loads_total{loader,known}: BPF programs loaded, from the audit
+#   rule with key bpf (monitoring.logs). systemd (PID 1) and the programs in
+#   bpf.knownLoaders are known loaders; any other load is worth a look.
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+let
+  cfg = config.ethpandaops.monitoring.kernel;
+  auditOn = config.security.audit.enable != false;
+
+  checks =
+    lib.optional config.security.lockKernelModules {
+      check = "modules_disabled";
+      kind = "sysctl";
+      arg = "kernel/modules_disabled";
+      want = "1";
+    }
+    ++ lib.optionals config.security.protectKernelImage [
+      {
+        check = "kexec_load_disabled";
+        kind = "sysctl";
+        arg = "kernel/kexec_load_disabled";
+        want = "1";
+      }
+      {
+        check = "cmdline:nohibernate";
+        kind = "cmdline";
+        arg = "nohibernate";
+      }
+    ]
+    ++ lib.optionals auditOn [
+      {
+        check = "cmdline:audit=1";
+        kind = "cmdline";
+        arg = "audit=1";
+      }
+      {
+        check = "audit_enabled";
+        kind = "audit";
+        want = if config.security.audit.enable == "lock" then "2" else "1";
+      }
+    ];
+
+  settings = pkgs.writeText "nixhost-kernel.json" (
+    builtins.toJSON {
+      inherit checks;
+      audit = auditOn;
+      inherit (cfg.bpf) knownLoaders;
+    }
+  );
+
+  script = pkgs.writeShellApplication {
+    name = "nixhost-kernel";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.diffutils
+      pkgs.gawk
+      pkgs.gnugrep
+      pkgs.jq
+      pkgs.systemd
+    ]
+    ++ lib.optional auditOn config.security.audit.package;
+    text = ''
+      SETTINGS=${settings}
+      ${config.ethpandaops.lib.shell}
+      ${builtins.readFile ./drift-common.sh}
+      ${builtins.readFile ./kernel.sh}
+    '';
+  };
+in
+{
+  imports = [ ../metrics.nix ];
+
+  options.ethpandaops.monitoring.kernel = {
+    enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Report kernel protections, the audit system and BPF program loads as textfile metrics.";
+    };
+    bpf.knownLoaders = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = lib.optionals config.virtualisation.docker.enable [
+        "runc"
+        "dockerd"
+        "containerd"
+      ];
+      defaultText = lib.literalExpression ''lib.optionals config.virtualisation.docker.enable [ "runc" "dockerd" "containerd" ]'';
+      example = [ "tailscaled" ];
+      description = ''
+        Programs whose BPF loads are expected, by executable name without
+        NixOS's wrapper (.<name>-wrapped), for executables in the Nix store.
+        systemd (PID 1) is always known: it loads programs for units' IP
+        filters and device and filesystem restrictions. runc loads cgroup
+        device filters for every container.
+      '';
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    systemd.services.nixhost-kernel = {
+      description = "Check kernel protections, the audit system and BPF loads";
+      startLimitIntervalSec = 0;
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = lib.getExe script;
+        StateDirectory = "nixhost-kernel";
+        StateDirectoryMode = "0700";
+      };
+    };
+    systemd.timers.nixhost-kernel = {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "1min";
+        OnUnitActiveSec = "1min";
+      };
+    };
+  };
+}

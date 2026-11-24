@@ -15,6 +15,7 @@ in
   imports = [
     ../metrics.nix
     ./drift.nix
+    ./kernel.nix
     ./labels.nix
     ./logs.nix
     ./vulnix.nix
