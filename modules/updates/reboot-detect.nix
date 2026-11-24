@@ -1,7 +1,8 @@
 # Works out whether the box needs a reboot to run what is deployed: it
 # compares the booted system with /run/current-system for the kernel, initrd,
-# kernel modules and systemd. It only reports: the standard
-# /run/reboot-required sentinel (which tools such as kured read),
+# kernel modules, kernel parameters and systemd, and, with
+# security.lockKernelModules, the modules loaded at boot. It only reports: the
+# standard /run/reboot-required sentinel (which tools such as kured read),
 # /run/nixhost/reboot/required.json and nixhost_reboot_pending* metrics.
 # reboot-interactive, or another tool, decides when to reboot.
 #
@@ -41,7 +42,14 @@ in
       "kernel-modules"
       "kernel-params"
       "systemd"
-    ];
+    ]
+    # With module loading locked after boot, a module added to
+    # boot.kernelModules loads only at the next boot.
+    ++ lib.optional config.security.lockKernelModules "etc/modules-load.d/nixos.conf";
+    defaultText = lib.literalExpression ''
+      [ "kernel" "initrd" "kernel-modules" "kernel-params" "systemd" ]
+      ++ lib.optional config.security.lockKernelModules "etc/modules-load.d/nixos.conf"
+    '';
     description = "Parts of the system that need a reboot when they change: links, compared by target, or files, such as kernel-params, compared by content.";
   };
 

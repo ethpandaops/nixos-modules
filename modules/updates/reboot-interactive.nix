@@ -10,6 +10,11 @@
 #   deadlineWarningMinutes countdown with wall warnings, overriding holds,
 #   logins and inhibitors.
 #
+# A kernel of a new series (7.3 to 7.4) is the exception: it never reboots
+# by itself, because if it doesn't boot on this hardware someone with console
+# access has to be on hand. The admins hear about it and reboot with
+# reboot-at or reboot-now; the deadline only becomes an alert.
+#
 # Users run reboot-status, reboot-hold <duration>, reboot-at <time> and
 # reboot-now. Changing the schedule needs sudo. Admins set critical,
 # maxDelay or pauseUntil in the host repo.
@@ -49,7 +54,12 @@ let
       windowEnd = minutes cfg.window.end;
       minDelay = seconds cfg.minDelay;
       maxDelay = seconds (if cfg.critical then cfg.criticalMaxDelay else cfg.maxDelay);
-      inherit (cfg) critical pauseUntil deadlineWarningMinutes;
+      inherit (cfg)
+        critical
+        pauseUntil
+        deadlineWarningMinutes
+        holdKernelSeriesChange
+        ;
     }
   );
 
@@ -111,6 +121,17 @@ in
     criticalMaxDelay = lib.mkOption {
       type = duration;
       default = "24h";
+    };
+    holdKernelSeriesChange = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Leave a kernel update to a new series (major.minor, such as 7.3 to 7.4)
+        to a person: no reboot in the window or at the deadline, and the admins
+        are told to run reboot-at or reboot-now while someone with console
+        access is on hand. The deadline becomes theirs, an alert rather than a
+        reboot. critical lifts it.
+      '';
     };
     pauseUntil = lib.mkOption {
       type = lib.types.nullOr (lib.types.strMatching "[0-9]{4}-[0-9]{2}-[0-9]{2}");
