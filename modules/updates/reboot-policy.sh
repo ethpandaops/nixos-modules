@@ -86,13 +86,14 @@ reboot_regardless() {
 # countdown <epoch>: wall warnings, then reboot_regardless. Runs as
 # nixhost-deadline-reboot.service.
 countdown() {
-  local at=$1 minutes when
+  local at=$1 minutes delay
   for minutes in 60 30 10 1 0; do
-    when=$((at - minutes * 60))
-    if [ "$when" -lt "$(date +%s)" ]; then
+    # One clock read: two can straddle a second and ask sleep for -1.
+    delay=$((at - minutes * 60 - $(date +%s)))
+    if [ "$delay" -lt 0 ]; then
       continue
     fi
-    sleep $((when - $(date +%s)))
+    sleep "$delay"
     if [ "$minutes" -gt 0 ]; then
       wall "This box reboots in $minutes minute(s), at $(fmt "$at"), to finish an update: the deadline has passed. Save your work."
     fi
@@ -147,6 +148,16 @@ pending() {
   [ -r "$RUN/required.json" ] && [ "$(jq -r .required "$RUN/required.json")" = true ]
 }
 
+# kernel_series_change: whether the pending kernel is of another series
+# (major.minor) than the booted one, such as 7.3.5 -> 7.4.1.
+kernel_series_change() {
+  local booted new
+  jq -e '.components | index("kernel")' "$RUN/required.json" >/dev/null || return 1
+  booted=$(jq -r .kernel.booted "$RUN/required.json")
+  new=$(jq -r .kernel.new "$RUN/required.json")
+  [ "$(cut -d. -f1-2 <<<"$booted")" != "$(cut -d. -f1-2 <<<"$new")" ]
+}
+
 clear_pending_state() {
   rm -f "$RUN"/motd "$RUN"/status-line "$RUN"/policy.json "$RUN"/hold-until "$RUN"/hold-by \
     "$RUN"/reboot-at "$RUN"/reboot-at-by "$RUN"/rebooting-at "$RUN"/notified-*
@@ -156,7 +167,7 @@ clear_pending_state() {
 policy() {
   mkdir -p "$RUN" "$STATE"
   local now since deadline paused pause_end hold hold_by at at_by earliest planned scheduled
-  local what first critical sessions inhibitors reason
+  local what first critical supervised sessions inhibitors reason
   now=$(date +%s)
 
   # Back from a reboot this policy started: say so once.
@@ -177,6 +188,14 @@ policy() {
   since=$(jq -r .since "$RUN/required.json")
   deadline=$((since + $(setting maxDelay)))
   critical=$(setting critical)
+  # A new kernel series never reboots by itself, in the window or at the
+  # deadline: if it doesn't boot on this hardware, someone with console
+  # access has to be on hand. An admin reboots with reboot-at or reboot-now;
+  # the deadline becomes theirs (nixhost_reboot_deadline_timestamp_seconds).
+  supervised=0
+  if [ -n "$(setting holdKernelSeriesChange)" ] && [ -z "$critical" ] && kernel_series_change; then
+    supervised=1
+  fi
   paused=0
   pause_end=0
   if [ -n "$(setting pauseUntil)" ]; then
@@ -200,7 +219,7 @@ policy() {
 
   at=$(readnum "$RUN/reboot-at")
   at_by=$(cat "$RUN/reboot-at-by" 2>/dev/null || echo someone)
-  if [ "$at" -gt "$deadline" ]; then
+  if [ "$supervised" = 0 ] && [ "$at" -gt "$deadline" ]; then
     at=$deadline
   fi
 
@@ -222,13 +241,18 @@ policy() {
     what="$what, marked critical by the admins"
   fi
 
+  if [ "$supervised" = 1 ]; then
+    what="$what, a new kernel series"
+    planned=$at
+  fi
+
   scheduled=$(scheduled_reboot)
   sessions=$(open_sessions | sort -u | paste -sd, -)
   inhibitors=$(shutdown_inhibitors | paste -sd, -)
 
   if [ "$scheduled" -eq 0 ]; then
     reason=""
-    if [ "$paused" = 0 ] && [ "$now" -ge "$deadline" ]; then
+    if [ "$paused" = 0 ] && [ "$supervised" = 0 ] && [ "$now" -ge "$deadline" ]; then
       echo "deadline $(fmt "$deadline") reached; rebooting in $(setting deadlineWarningMinutes) minutes"
       record_reboot "deadline reached"
       scheduled=$((now + $(setting deadlineWarningMinutes) * 60))
@@ -240,11 +264,11 @@ policy() {
       "$NOTIFY" all "Deadline reached: rebooting at $(fmt "$scheduled") to finish an update. ${what}." || true
     elif [ "$at" -gt 0 ] && [ "$now" -ge "$at" ]; then
       reason="the time $at_by chose with reboot-at"
-    elif [ "$paused" = 0 ] && [ "$now" -ge "$((since + $(setting minDelay)))" ] && [ "$now" -ge "$hold" ] &&
-      in_window "$now" && [ -z "$sessions" ] && [ -z "$inhibitors" ]; then
+    elif [ "$paused" = 0 ] && [ "$supervised" = 0 ] && [ "$now" -ge "$((since + $(setting minDelay)))" ] &&
+      [ "$now" -ge "$hold" ] && in_window "$now" && [ -z "$sessions" ] && [ -z "$inhibitors" ]; then
       reason="nightly window, nobody logged in"
     else
-      echo "waiting: planned $(fmt "$planned"), deadline $(fmt "$deadline"), sessions [$sessions], inhibitors [$inhibitors], hold $hold, paused $paused"
+      echo "waiting: planned $(fmt "$planned"), deadline $(fmt "$deadline"), sessions [$sessions], inhibitors [$inhibitors], hold $hold, paused $paused, supervised $supervised"
     fi
     if [ -n "$reason" ]; then
       echo "rebooting now: $reason"
@@ -265,6 +289,9 @@ policy() {
     if [ "$scheduled" -gt 0 ]; then
       echo "*** REBOOTING at $(fmt "$scheduled"). Save your work."
     else
+      if [ "$supervised" = 1 ]; then
+        echo "*** It doesn't reboot by itself: an admin reboots it (reboot-at or reboot-now) with someone on hand who can fix a boot that fails"
+      fi
       if [ "$paused" = 1 ]; then
         echo "*** Automatic reboots are paused by the admins until $(fmt "$pause_end")"
       fi
@@ -273,31 +300,47 @@ policy() {
       fi
       if [ "$at" -gt 0 ] && [ "$planned" = "$at" ]; then
         echo "*** Planned reboot: $(fmt "$planned"), as $at_by asked with reboot-at"
-      elif [ "$planned" -lt "$deadline" ]; then
+      elif [ "$supervised" = 0 ] && [ "$planned" -lt "$deadline" ]; then
         echo "*** Planned reboot: $(fmt "$planned"), only if nobody is logged in and no hold is set"
       fi
-      echo "*** Hard deadline:  $(fmt "$deadline") (reboots then even if you're busy)"
+      if [ "$supervised" = 1 ]; then
+        echo "*** Admins' deadline: $(fmt "$deadline")"
+      else
+        echo "*** Hard deadline:  $(fmt "$deadline") (reboots then even if you're busy)"
+      fi
     fi
     echo "*** Commands: reboot-status | reboot-hold 48h | reboot-at \"Fri 02:00\" | reboot-now"
-    echo "*** Long job? Run it as: systemd-inhibit --what=shutdown --why=\"3-day run\" <command>"
+    echo "*** Long job? Hold the reboot while it runs: reboot-hold 3d (sudo users, up to the deadline)"
   } >"$RUN/motd.tmp"
   mv -f "$RUN/motd.tmp" "$RUN/motd"
   chmod 0644 "$RUN/motd"
   if [ "$scheduled" -gt 0 ]; then
     first="Rebooting at $(fmt "$scheduled") for a pending update. Save your work."
+  elif [ "$supervised" = 1 ] && [ "$planned" -gt 0 ]; then
+    first="Reboot pending for a new kernel series: planned $(fmt "$planned") with reboot-at. Run reboot-status."
+  elif [ "$supervised" = 1 ]; then
+    first="Reboot pending for a new kernel series: an admin will schedule it. Run reboot-status."
   else
     first="Reboot pending for an update: planned $(fmt "$planned"), deadline $(fmt "$deadline"). Run reboot-status."
   fi
   echo "$first" >"$RUN/status-line"
   jq -n --argjson since "$since" --argjson deadline "$deadline" --argjson planned "$planned" \
     --argjson hold "$hold" --argjson at "$at" --argjson paused "$paused" --argjson scheduled "$scheduled" \
-    '{$since, $deadline, $planned, $hold, $at, $paused, $scheduled}' >"$RUN/policy.json"
+    --argjson supervised "$supervised" \
+    '{$since, $deadline, $planned, $hold, $at, $paused, $scheduled, $supervised}' >"$RUN/policy.json"
 
   # One-time notices.
   if remember notified-pending "$since"; then
-    notify_users "A reboot is pending. ${what}. Planned: $(fmt "$planned"); deadline: $(fmt "$deadline"). Use reboot-hold or reboot-at on the box to choose another time."
+    if [ "$supervised" = 1 ]; then
+      notify_users "A reboot is pending. ${what}, so it doesn't happen by itself: an admin will schedule it, and reboot-status on the box shows when."
+    else
+      notify_users "A reboot is pending. ${what}. Planned: $(fmt "$planned"); deadline: $(fmt "$deadline"). Use reboot-hold or reboot-at on the box to choose another time."
+    fi
   fi
-  if [ "$paused" = 0 ] && [ "$scheduled" -eq 0 ]; then
+  if [ "$supervised" = 1 ] && remember notified-supervised "$(jq -r .kernel.new "$RUN/required.json")"; then
+    "$NOTIFY" admins "${what}: it needs a supervised reboot. Run reboot-at or reboot-now on the box while someone with console access is on hand, by $(fmt "$deadline")." || true
+  fi
+  if [ "$paused" = 0 ] && [ "$supervised" = 0 ] && [ "$scheduled" -eq 0 ]; then
     if [ "$((deadline - now))" -le 3600 ] && remember notified-1h "$deadline"; then
       wall "This box reboots within an hour ($(fmt "$deadline")) to finish an update. Run reboot-status for details."
       notify_users "The box reboots within an hour, at $(fmt "$deadline"), to finish an update."
@@ -308,10 +351,13 @@ policy() {
   fi
 
   write_metrics nixhost_reboot_policy <<METRICS
-# HELP nixhost_reboot_deadline_timestamp_seconds When the box reboots regardless.
+# HELP nixhost_reboot_deadline_timestamp_seconds When the box reboots regardless; for a new kernel series, when the admins should have rebooted it.
 # TYPE nixhost_reboot_deadline_timestamp_seconds gauge
 nixhost_reboot_deadline_timestamp_seconds $deadline
-# HELP nixhost_reboot_planned_timestamp_seconds The next time the policy may reboot.
+# HELP nixhost_reboot_supervised Whether the pending reboot is for a new kernel series, which waits for an admin's reboot-at or reboot-now.
+# TYPE nixhost_reboot_supervised gauge
+nixhost_reboot_supervised $supervised
+# HELP nixhost_reboot_planned_timestamp_seconds The next time the policy may reboot, or 0 for none.
 # TYPE nixhost_reboot_planned_timestamp_seconds gauge
 nixhost_reboot_planned_timestamp_seconds $planned
 # HELP nixhost_reboot_hold_until_timestamp_seconds A user's hold, or 0.
@@ -401,7 +447,8 @@ at() {
     echo "That time has passed. Use reboot-now to reboot now." >&2
     exit 2
   fi
-  if [ "$deadline" -gt 0 ] && [ "$when" -gt "$deadline" ]; then
+  if [ "$deadline" -gt 0 ] && [ "$when" -gt "$deadline" ] &&
+    [ "$(jq -r '.supervised // 0' "$RUN/policy.json" 2>/dev/null)" != 1 ]; then
     echo "That's after the deadline, $(fmt "$deadline"), when the box reboots anyway." >&2
     exit 2
   fi
