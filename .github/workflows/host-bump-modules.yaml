@@ -1,0 +1,54 @@
+# Reusable: move the nixos-modules input to the newest commit on its default
+# branch whose check passed and that is at least `min-age-hours` old, build,
+# commit and push (or open a pull request), then start check
+# (ci/bump-modules.sh at the nixos-modules commit the caller's flake.lock
+# pins, so the bump that brings a new version runs the old one). A fleet whose
+# rollout runs staging first takes master at once (0); a single host with no
+# staging waits a day (24). The caller grants contents: write and
+# actions: write (pull-requests: write too for mode pr).
+#
+#   jobs:
+#     bump:
+#       permissions: { contents: write, actions: write }
+#       uses: ethpandaops/nixos-modules/.github/workflows/host-bump-modules.yaml@<commit>
+#       with: { build: myhost, min-age-hours: 24 }
+name: host-bump-modules
+on:
+  workflow_call:
+    inputs:
+      build:
+        description: Hosts whose systems to build first, space-separated
+        type: string
+        default: ""
+      min-age-hours:
+        type: number
+        default: 0
+      branch:
+        type: string
+        default: master
+      mode:
+        description: push to the branch, or pr to open a pull request
+        type: string
+        default: push
+jobs:
+  bump:
+    if: github.ref_name == inputs.branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+      - name: Bump nixos-modules
+        env:
+          BUILD: ${{ inputs.build }}
+          MIN_AGE: ${{ inputs.min-age-hours }}
+          BRANCH: ${{ inputs.branch }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          nix run --inputs-from . nixos-modules#bump-modules -- \
+            --build "$BUILD" --min-age-hours "$MIN_AGE" --branch "$BRANCH" --mode "$MODE"

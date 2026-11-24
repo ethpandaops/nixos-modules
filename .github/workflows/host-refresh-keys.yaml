@@ -1,0 +1,52 @@
+# Reusable: refresh keys/<login>.keys from GitHub for the people already
+# listed, pinned to keys/github-ids.json, build, commit and push (or open a
+# pull request), start check, and post every change and problem to the
+# webhook (ci/refresh-keys.sh at the nixos-modules commit the caller's
+# flake.lock pins). The caller grants contents: write and actions: write.
+#
+#   jobs:
+#     refresh:
+#       permissions: { contents: write, actions: write }
+#       uses: ethpandaops/nixos-modules/.github/workflows/host-refresh-keys.yaml@<commit>
+#       with: { host: myhost }
+#       secrets: { webhook: "${{ secrets.KEYS_WEBHOOK }}" }
+name: host-refresh-keys
+on:
+  workflow_call:
+    inputs:
+      host:
+        description: The nixosConfiguration to build, and the name notices post under
+        type: string
+        required: true
+      branch:
+        type: string
+        default: master
+      mode:
+        description: push to the branch, or pr to open a pull request
+        type: string
+        default: push
+    secrets:
+      webhook:
+        description: A Discord webhook URL (plain or ending in /slack) for the notices
+        required: false
+jobs:
+  refresh:
+    if: github.ref_name == inputs.branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+      - name: Refresh keys
+        env:
+          HOST: ${{ inputs.host }}
+          BRANCH: ${{ inputs.branch }}
+          MODE: ${{ inputs.mode }}
+          WEBHOOK: ${{ secrets.webhook }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: nix run --inputs-from . nixos-modules#refresh-keys -- --host "$HOST" --branch "$BRANCH" --mode "$MODE"
