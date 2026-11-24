@@ -13,10 +13,11 @@
 #   rule with key bpf (monitoring.logs). systemd (PID 1), the programs in
 #   bpf.knownLoaders and the executables in bpf.knownExecutables are known
 #   loaders; any other load is worth a look.
-# - nixhost_kernel_module_late_loads_total{module}: modules loaded after boot,
-#   from the audit rule with key modules (monitoring.logs). That's what
-#   security.lockKernelModules would refuse, so it's the list to load at boot
-#   before turning the lock on (ethpandaops.kernelModules).
+# - nixhost_kernel_module_late_loads_total{module}: modules loaded after boot
+#   (once multi-user.target is reached and udev has settled, when the lock
+#   would engage), from the audit rule with key modules (monitoring.logs).
+#   That's what security.lockKernelModules would refuse, so it's the list to
+#   load at boot before turning the lock on (ethpandaops.kernelModules).
 {
   config,
   lib,
@@ -157,6 +158,27 @@ in
         OnBootSec = "1min";
         OnUnitActiveSec = "1min";
       };
+    };
+    # When security.lockKernelModules would lock: NixOS's
+    # disable-kernel-module-loading runs after multi-user.target and waits
+    # for udev to settle, so drivers udev is still loading at
+    # multi-user.target aren't refused. Module loads count as late from here.
+    systemd.services.nixhost-module-lock-point = {
+      description = "Mark when security.lockKernelModules locks module loading";
+      wants = [ "systemd-udevd.service" ];
+      wantedBy = [ config.systemd.defaultUnit ];
+      after = [
+        "firewall.service"
+        "systemd-modules-load.service"
+        "disable-kernel-module-loading.service"
+        config.systemd.defaultUnit
+      ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        TimeoutSec = 180;
+      };
+      script = "${config.systemd.package}/bin/udevadm settle || true";
     };
   };
 }

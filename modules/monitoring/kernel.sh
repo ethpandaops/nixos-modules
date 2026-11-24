@@ -110,8 +110,8 @@ if [ "$(jq -r .audit "$SETTINGS")" = true ]; then
   #   Nix store) or by an executable in knownExecutables (an exact path, such
   #   as one inside a container's image) is known; any other is not.
   # - Kernel modules loaded after boot (KERN_MODULE records, from the modules
-  #   rule), counting from when multi-user.target was reached: what
-  #   security.lockKernelModules would refuse.
+  #   rule), counting from nixhost-module-lock-point (multi-user.target
+  #   reached and udev settled): what security.lockKernelModules would refuse.
   counts_file=$STATE/bpf-loads
   modules_file=$STATE/module-late-loads
   cursor_file=$STATE/bpf-cursor
@@ -135,7 +135,7 @@ if [ "$(jq -r .audit "$SETTINGS")" = true ]; then
     done <"$modules_file"
   fi
   boot_id=$(cat /proc/sys/kernel/random/boot_id)
-  booted_at=$(systemctl show -p ActiveEnterTimestamp --value multi-user.target)
+  booted_at=$(systemctl show -p ActiveEnterTimestamp --value nixhost-module-lock-point.service)
   booted_at=$([ -z "$booted_at" ] || date -d "$booted_at" +%s)
   if [ -s "$cursor_file" ]; then
     since=(--after-cursor="$(cat "$cursor_file")")
@@ -183,12 +183,18 @@ if [ "$(jq -r .audit "$SETTINGS")" = true ]; then
     counts["$loader $known"]=$((${counts["$loader $known"]:-0} + 1))
   done < <(journalctl --quiet --no-pager --output=json "${since[@]}" _TRANSPORT=audit |
     jq -r 'def unquote: ltrimstr("\"") | rtrimstr("\"");
-      [.__CURSOR,
-      (if (._AUDIT_FIELD_KEY // "" | unquote) == "bpf" and ._AUDIT_FIELD_SUCCESS == "yes" then "bpf"
-       elif ._AUDIT_TYPE_NAME == "KERN_MODULE" then "module" else "" end),
+      # journalctl writes a field with unprintable bytes as an array of
+      # them. One line per entry whatever the fields hold: an error here
+      # would stop every later run at the same entry.
+      def str: (if type == "array" then implode elif type == "string" then . else tostring end)
+        | gsub("[[:cntrl:]]"; " ");
+      (if (._AUDIT_FIELD_KEY // "" | str | unquote) == "bpf" and ._AUDIT_FIELD_SUCCESS == "yes" then "bpf"
+       elif ._AUDIT_TYPE_NAME == "KERN_MODULE" then "module" else "" end) as $kind
+      | [.__CURSOR, $kind,
       ._PID // "", ._EXE // "", ._COMM // "", ._AUDIT_LOGINUID // "unset",
       ((.__REALTIME_TIMESTAMP | tonumber) / 1000000 | floor | tostring),
-      ._BOOT_ID // "", (._AUDIT_FIELD_NAME // "" | unquote)] | join("\u001f")')
+      ._BOOT_ID // "", (if $kind == "module" then ._AUDIT_FIELD_NAME // "" else "" end)]
+      | map(str) | .[8] |= unquote | join("\u001f")')
   for entry in "${!counts[@]}"; do
     echo "$entry ${counts[$entry]}"
   done | sort >"$counts_file.tmp"
@@ -210,7 +216,7 @@ if [ "$(jq -r .audit "$SETTINGS")" = true ]; then
       echo "# TYPE nixhost_bpf_last_unknown_load_timestamp_seconds gauge"
       echo "nixhost_bpf_last_unknown_load_timestamp_seconds{exe=\"$exe\",comm=\"$comm\",auid=\"$auid\"} $at"
     fi
-    echo "# HELP nixhost_kernel_module_late_modules Kernel modules loaded after boot (after multi-user.target): what security.lockKernelModules would refuse. Add each to boot.kernelModules (ethpandaops.kernelModules.allowlist) before locking."
+    echo "# HELP nixhost_kernel_module_late_modules Kernel modules loaded after boot (after multi-user.target and udev settled): what security.lockKernelModules would refuse. Add each to boot.kernelModules (ethpandaops.kernelModules.allowlist) before locking."
     echo "# TYPE nixhost_kernel_module_late_modules gauge"
     echo "nixhost_kernel_module_late_modules ${#late[@]}"
     echo "# HELP nixhost_kernel_module_late_loads_total Loads of each kernel module after boot, at most $MAX_SERIES modules."

@@ -1,7 +1,8 @@
 # Locking kernel module loading after boot, and the modules to load at boot
 # so that's safe. With security.lockKernelModules nothing loads a module once
-# multi-user.target is reached, root included, until the next reboot: a
-# service that needs one later gets an error, and the feature breaks.
+# multi-user.target is reached and udev has settled, root included, until the
+# next reboot: a service that needs one later gets an error, and the feature
+# breaks.
 #
 # Collect, then lock:
 #   1. Leave lock off, with monitoring and monitoring.logs (its audit rules)
