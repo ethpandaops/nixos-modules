@@ -63,6 +63,7 @@ in
       self.nixosModules.monitoring
     ];
     ethpandaops.monitoring.tailscale.enable = false;
+    ethpandaops.host.environment = "test";
     ethpandaops.monitoring.vulnix = {
       enable = true;
       package = stub;

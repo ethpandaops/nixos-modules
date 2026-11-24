@@ -17,6 +17,7 @@
       "/dev/disk/by-id/disk-a"
       "/dev/disk/by-id/disk-b"
     ];
+    host.environment = "production";
     deploy.repository = "ssh://git@github.com/example/config.git";
     secrets.file = ./fixtures/secrets.yaml;
     monitoring.tailscale = {

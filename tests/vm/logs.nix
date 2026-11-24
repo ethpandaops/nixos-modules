@@ -38,6 +38,10 @@ in
     ];
     networking.hostName = "logbox";
     ethpandaops.monitoring.tailscale.enable = false;
+    ethpandaops.host = {
+      fleet = "logfleet";
+      environment = "staging";
+    };
     ethpandaops.monitoring.logs = {
       enable = true;
       endpoint = "http://127.0.0.1:4318";
@@ -73,7 +77,7 @@ in
         server.succeed("logger -t logtest -p user.err marker-ordinary-entry")
         wait_shipped("marker-ordinary-entry")
         assert shipped(f"/v1/logs {auth}"), "no request with the configured basic auth"
-        for text in ["host.name", "logbox", "syslog.identifier", "logtest", "ERROR"]:
+        for text in ["host.name", "logbox", "ethpandaops.fleet", "logfleet", "deployment.environment", "staging", "syslog.identifier", "logtest", "ERROR"]:
             assert shipped(text), text
 
     with subtest("a sudoers change is shipped as an audit record"):
