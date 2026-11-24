@@ -65,8 +65,13 @@ run_checks() {
 }
 
 # wait_healthy: retry the checks until they pass or the timeout runs out.
+# Cached answers from before an activation (resolved's DNS cache, and its
+# copy of /etc/hosts, reread at most every 2 s) could pass a system whose
+# DNS is broken, so flush them and let it settle first.
 wait_healthy() {
   local start
+  resolvectl flush-caches 2>/dev/null || true
+  sleep 3
   start=$(date +%s)
   until run_checks; do
     if [ $(($(date +%s) - start)) -ge "$(setting .healthCheck.timeout)" ]; then
