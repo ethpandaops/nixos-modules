@@ -53,6 +53,7 @@ in
 
   testScript = ''
     import base64
+    import re
 
     auth = "Basic " + base64.b64encode(b"nixhost-test:s3cret").decode()
 
@@ -85,6 +86,10 @@ in
         server.succeed("sh -c 'echo 1001 > /proc/self/loginuid && exec /run/current-system/sw/bin/true marker-root-exec'")
         wait_shipped('key="root-exec"')
         assert shipped("marker-root-exec"), "the command's arguments are missing"
+        # The audit.key attribute is the bare key, not the kernel's quoted
+        # field: OTLP's KeyValue{"audit.key", AnyValue{string_value}}.
+        sink = base64.b64decode(server.succeed("base64 -w0 /var/lib/otlp-sink.log"))
+        assert re.search(rb"audit\.key\x12.\x0a.root-exec", sink, re.S), "audit.key isn't the bare key"
         # Services have no login uid, so their commands aren't recorded.
         server.succeed("systemd-run --wait --description=service-exec-test /run/current-system/sw/bin/true marker-service-exec")
         server.succeed("logger -t logtest marker-after-service")

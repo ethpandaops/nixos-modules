@@ -48,7 +48,11 @@ function journal_to_otlp(tag, ts, record)
     for key, value in pairs(record) do
       local field = key:match("^_AUDIT_FIELD_(.+)$")
       if field then
-        out["audit." .. field:lower()] = value
+        -- The kernel quotes string fields (key="root-exec"); "(null)" is no key.
+        value = value:match('^"(.*)"$') or value
+        if value ~= "(null)" then
+          out["audit." .. field:lower()] = value
+        end
       end
     end
   end
