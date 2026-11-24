@@ -42,6 +42,8 @@ in
   testScript = ''
     start_all()
     server.wait_for_unit("sshd.service")
+    # The client's network too: an early ssh finds it unreachable.
+    client.wait_for_unit("multi-user.target")
     client.succeed("install -m 600 ${keys.snakeOilPrivateKey} /root/key")
     # -n: never read the test driver's console as stdin.
     ssh = "ssh -n -i /root/key -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10"

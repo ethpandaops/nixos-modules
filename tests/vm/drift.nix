@@ -108,6 +108,8 @@ in
             "install -d -m 700 /var/lib/nixhost-drift",
             "printf '%s\\n' 'alice.mode known 0' 'alice.mode unknown 0' 'carol unknown 2' > /var/lib/nixhost-drift/ssh-logins",
         )
+        # Anyone can log a line as sshd; only root's sshd lines count.
+        server.succeed("su - bob -c \"logger -t sshd-session 'Accepted publickey for alice from 192.0.2.66 port 1 ssh2: ED25519 SHA256:forged'\"")
         client.succeed(f"{ssh} -i /root/key alice@server true")
         out = wait_logins('nixhost_ssh_logins_total{user="alice",key="known"}', 1)
         assert value(out, 'nixhost_ssh_logins_total{user="alice",key="unknown"}') == 0, out

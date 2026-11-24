@@ -36,6 +36,16 @@ fi
       fi
       ;;
     audit) [ "$(awk '$1 == "enabled" { print $2 }' <<<"$audit_status")" != "$want" ] || ok=1 ;;
+    firewall)
+      ok=1
+      if [ "$arg" = nftables ]; then
+        nft list table inet nixos-fw >/dev/null 2>&1 || ok=0
+      else
+        for command in $arg; do
+          "$command" -w -C INPUT -j nixos-fw 2>/dev/null || ok=0
+        done
+      fi
+      ;;
     esac
     echo "nixhost_kernel_protection{check=\"$(label "$check")\"} $ok"
   done < <(jq -r '.checks[] | [.check, .kind, .arg, .want] | join("\u001f")' "$SETTINGS")

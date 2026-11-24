@@ -2,7 +2,8 @@
 # is one the running configuration pins for that user (the store copy of
 # /etc/ssh/authorized_keys.d, not the live one, which root can edit). sshd
 # accepts only those keys here, so an unknown key means the live file or
-# sshd's configuration was changed.
+# sshd's configuration was changed. Only root's sshd lines count: anyone can
+# log a line as sshd with logger.
 now=$(date +%s)
 current=$(readlink -f /run/current-system)
 keys_dir=$current/etc/ssh/authorized_keys.d
@@ -56,7 +57,7 @@ while IFS= read -r line; do
     printf '%s %s %s %s %s\n' "${line%%.*}" "$user" "$method" "${fingerprint:-none}" "$from" >"$last_unknown_file"
   fi
 done < <(journalctl --quiet --no-pager --output=short-unix --show-cursor "${since[@]}" \
-  --identifier=sshd --identifier=sshd-session --identifier=sshd-auth)
+  --identifier=sshd --identifier=sshd-session --identifier=sshd-auth _UID=0)
 
 for entry in "${!counts[@]}"; do
   echo "$entry ${counts[$entry]}"

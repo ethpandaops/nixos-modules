@@ -1,8 +1,9 @@
 # Kernel tampering metrics on a booted, hardened server with audit=1: every
 # protection the configuration turns on reads as in force; a command-line
 # protection the running kernel lacks is tampering, or pending when the
-# booted system never had it; deleting an audit rule or turning auditing off
-# is reported; systemd's BPF loads are known and another program's aren't.
+# booted system never had it; a firewall whose rules a failed reload took
+# out is reported; deleting an audit rule or turning auditing off is
+# reported; systemd's BPF loads are known and another program's aren't.
 { self, pkgs, ... }:
 let
   # bpf(BPF_PROG_LOAD) of a two-instruction socket filter, as in the logs test.
@@ -53,7 +54,7 @@ in
         assert m, f"{series} missing from:\n{text}"
         return float(m.group(1))
 
-    protections = ["modules_disabled", "kexec_load_disabled", "cmdline:nohibernate", "cmdline:audit=1", "audit_enabled"]
+    protections = ["modules_disabled", "kexec_load_disabled", "cmdline:nohibernate", "firewall", "cmdline:audit=1", "audit_enabled"]
 
     server.wait_for_unit("multi-user.target")
     server.wait_for_unit("audit-rules-nixos.service")
@@ -68,6 +69,13 @@ in
         # monitoring.logs raises the audit backlog from NixOS's 1024.
         server.succeed("grep -q 'audit_backlog_limit=8192' /proc/cmdline")
         server.succeed("auditctl -s | grep -qx 'backlog_limit 8192'")
+
+    with subtest("a firewall without its rules is reported"):
+        # What NixOS leaves after a failed reload: the chains, but no jump to them.
+        server.succeed("ip6tables -w -D INPUT -j nixos-fw")
+        assert value(metrics(), 'nixhost_kernel_protection{check="firewall"}') == 0
+        server.succeed("systemctl reload firewall")
+        assert value(metrics(), 'nixhost_kernel_protection{check="firewall"}') == 1
 
     with subtest("a command-line protection the kernel lacks is tampering, or pending if the booted system never had it"):
         server.succeed(
@@ -106,8 +114,12 @@ in
         assert value(metrics(), 'nixhost_bpf_loads_total{loader="python3.13",known="false"}') == 1
 
     with subtest("deleting an audit rule or turning auditing off is reported"):
-        # The rule check leaves the 2 minutes after a load or activation alone.
-        server.wait_until_succeeds("[ $(cut -d. -f1 /proc/uptime) -ge 130 ]", timeout=180)
+        # The rule check leaves the 2 minutes after a load or activation alone;
+        # count from when the rules loaded, which varies with the boot.
+        server.wait_until_succeeds(
+            "[ $(( $(cut -d. -f1 /proc/uptime) - $(systemctl show -p ActiveEnterTimestampMonotonic --value audit-rules-nixos) / 1000000 )) -ge 125 ]",
+            timeout=180,
+        )
         server.succeed("touch -h -d '-10 min' /run/current-system")
         out = metrics()
         assert value(out, "nixhost_audit_rules_changed") == 0, out
