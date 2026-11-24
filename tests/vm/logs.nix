@@ -128,6 +128,11 @@ in
     with subtest("a module loaded after boot counts as one the module lock would refuse"):
         server.wait_for_unit("multi-user.target")
         server.succeed("modprobe dummy")
+        # What the audit trail holds for it, for the log if this fails.
+        print(server.succeed("lsmod | grep -w dummy || true"))
+        print(server.succeed(
+            "journalctl _TRANSPORT=audit -o json --since '-2 min' | jq -c 'select(._AUDIT_TYPE_NAME == \"KERN_MODULE\" or ._AUDIT_FIELD_KEY == \"\\\"modules\\\"\") | {_AUDIT_TYPE_NAME, _AUDIT_FIELD_NAME, _AUDIT_FIELD_KEY, _BOOT_ID, __REALTIME_TIMESTAMP}' | tail -n 6"
+        ))
         def late(_):
             server.succeed("systemctl start nixhost-kernel.service")
             return 'nixhost_kernel_module_late_loads_total{module="dummy"} 1' in server.succeed("cat /var/lib/node-exporter/nixhost_kernel.prom")
