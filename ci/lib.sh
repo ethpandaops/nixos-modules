@@ -23,12 +23,15 @@ build_hosts() {
 }
 
 # land <mode> <branch> <message file> [pr branch]: get the commit at HEAD to
-# the branch and start its check run. mode push pushes it to the branch;
-# mode pr pushes it to the pr branch and opens or updates a pull request.
-# Pushes made with GITHUB_TOKEN start no workflow, so check is started by
-# dispatch.
+# the branch and start its check run. Pushes made with GITHUB_TOKEN start no
+# workflow, so check is started by dispatch.
+# - push pushes it to the branch: for a repo whose nodes deploy any commit.
+# - pr pushes it to the pr branch and opens or updates a pull request that a
+#   person lands as their own signed commit: for a repo whose nodes deploy
+#   only commits signed by an allowed key, which neither this bot's commit
+#   nor GitHub's merge button has.
 land() {
-  local mode=$1 branch=$2 message=$3 pr_branch=${4:-} number
+  local mode=$1 branch=$2 message=$3 pr_branch=${4:-} number body
   case "$mode" in
   push)
     git push origin "HEAD:refs/heads/$branch"
@@ -36,11 +39,25 @@ land() {
     ;;
   pr)
     git push --force origin "HEAD:refs/heads/$pr_branch"
+    body=$(mktemp)
+    {
+      tail -n +3 "$message"
+      echo
+      echo "---"
+      echo "Land this as your own signed commit, not with the merge button: nodes that"
+      echo "deploy only signed commits refuse this bot's commit and GitHub's merge."
+      echo
+      echo "    git fetch origin $pr_branch && git switch $branch && git pull --ff-only"
+      echo "    git cherry-pick -S FETCH_HEAD"
+      echo "    git push origin $branch"
+      echo
+      echo "Then close this pull request; the next run opens a new one when there's more."
+    } >"$body"
     number=$(gh pr list --head "$pr_branch" --base "$branch" --state open --json number --jq '.[0].number // empty')
     if [ -n "$number" ]; then
-      gh pr edit "$number" --title "$(head -n1 "$message")" --body-file <(tail -n +3 "$message")
+      gh pr edit "$number" --title "$(head -n1 "$message")" --body-file "$body"
     else
-      gh pr create --base "$branch" --head "$pr_branch" --title "$(head -n1 "$message")" --body-file <(tail -n +3 "$message")
+      gh pr create --base "$branch" --head "$pr_branch" --title "$(head -n1 "$message")" --body-file "$body"
     fi
     gh workflow run check.yaml --ref "$pr_branch"
     ;;

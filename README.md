@@ -82,6 +82,15 @@ caller passes. The pushing jobs push with `GITHUB_TOKEN`, which starts no
 workflow, so they dispatch the caller's `check.yaml`; a deploy caller starts
 on check's `workflow_run`. Each workflow's header has a caller example.
 
+The jobs that commit (update-nixpkgs, refresh-keys, bump-modules) take a
+`mode`. `push`, the default, pushes to the branch, for a repo whose nodes
+deploy any commit. `pr` opens or updates a pull request instead, for a repo
+whose nodes deploy only commits signed by an allowed key: neither the bot's
+commit nor GitHub's merge button carries one, so a person lands it as their
+own signed commit (the pull request says how). host-deploy only
+fast-forwards a branch to a commit that's already there, so it works either
+way.
+
 ## Change
 
 Pull requests only: `master` needs a green `check`, which runs every flake
