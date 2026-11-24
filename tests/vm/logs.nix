@@ -1,7 +1,7 @@
 # The journal reaches the OTLP endpoint with the configured basic auth: an
-# ordinary entry, an audit record for a sudoers change, and a command a
-# logged-in user runs as root; container output doesn't. fluent-bit's counters reach
-# node-exporter's textfile directory.
+# ordinary entry, an audit record for a sudoers change, a command a
+# logged-in user runs as root and a BPF program load; container output
+# doesn't. fluent-bit's counters reach node-exporter's textfile directory.
 {
   self,
   pkgs,
@@ -26,6 +26,23 @@ let
             self.end_headers()
 
     http.server.HTTPServer(("127.0.0.1", 4318), Handler).serve_forever()
+  '';
+
+  # Loads a two-instruction socket filter (r0 = 0; exit) with
+  # bpf(BPF_PROG_LOAD), under a command name the test looks for.
+  bpfLoad = pkgs.writeText "bpf-load.py" ''
+    import ctypes, struct
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl(15, b"bpf-marker", 0, 0, 0)  # PR_SET_NAME
+    insns = ctypes.create_string_buffer(struct.pack("<BBhiBBhi", 0xB7, 0, 0, 0, 0x95, 0, 0, 0))
+    license = ctypes.create_string_buffer(b"GPL")
+    # union bpf_attr: prog_type (socket filter), insn_cnt, insns, license.
+    attr = ctypes.create_string_buffer(
+        struct.pack("<IIQQ", 1, 2, ctypes.addressof(insns), ctypes.addressof(license)), 128
+    )
+    if libc.syscall(321, 5, attr, 128) < 0:  # bpf(BPF_PROG_LOAD) on x86_64
+        raise OSError(ctypes.get_errno(), "bpf")
   '';
 in
 {
@@ -99,6 +116,14 @@ in
         server.succeed("logger -t logtest marker-after-service")
         wait_shipped("marker-after-service")
         assert not shipped("marker-service-exec"), "a service's command was recorded"
+
+    with subtest("a BPF program load is shipped with the process and login uid"):
+        server.succeed("sh -c 'echo 1001 > /proc/self/loginuid && exec ${pkgs.python3.interpreter} ${bpfLoad}'")
+        wait_shipped('comm="bpf-marker"')
+        sink = base64.b64decode(server.succeed("base64 -w0 /var/lib/otlp-sink.log"))
+        assert re.search(
+            rb'syscall=321 [^\n]*auid=1001 [^\n]*comm="bpf-marker"[^\n]*key="bpf"', sink
+        ), "no bpf record with the loader's login uid"
 
     with subtest("container output stays on the box"):
         server.succeed(

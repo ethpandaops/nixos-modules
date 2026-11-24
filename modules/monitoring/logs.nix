@@ -1,8 +1,9 @@
 # The journal shipped off the box over OTLP/HTTP with fluent-bit, so a record
 # of what happened on the box outlives the box: every unit's output, sshd and
 # sudo, and audit records for changes to accounts, sudo rules, SSH
-# configuration and kernel modules and for every command a person runs as
-# root. Container output (Docker's journald log driver) stays on the box.
+# configuration and kernel modules, for every BPF program loaded and for
+# every command a person runs as root. Container output (Docker's journald
+# log driver) stays on the box.
 #
 # Entries reach the endpoint as OTLP log records: the message as the body,
 # the syslog priority as the severity, the unit, identifier, process and audit
@@ -196,6 +197,12 @@ in
         "-w /etc/ssh -p wa -k ssh"
         "-w /root/.ssh -p wa -k ssh"
         "-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k modules"
+        # Every BPF program loaded (bpf() with BPF_PROG_LOAD, 5), with the
+        # process and login uid: root can change what the kernel does with
+        # BPF without loading a module, and the kernel's own BPF record names
+        # only the program. Loads by people, services and containers alike.
+        "-a always,exit -F arch=b64 -S bpf -F a0=5 -k bpf"
+        "-a always,exit -F arch=b32 -S bpf -F a0=5 -k bpf"
         # Commands run as root by a person: after sudo (a login uid of a
         # user), or in a root login. Services have no login uid.
         "-a always,exit -F arch=b64 -S execve -F euid=0 -F auid>=1000 -F auid!=unset -k root-exec"
