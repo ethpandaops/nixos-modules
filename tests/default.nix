@@ -42,6 +42,7 @@ in
   server = server.config.system.build.toplevel;
 
   access = vmTest ./vm/access.nix;
+  hardening = vmTest ./vm/hardening.nix;
   reboot-policy = vmTest ./vm/reboot-policy.nix;
   health-check = vmTest ./vm/health-check.nix;
   monitoring = vmTest ./vm/monitoring.nix;
