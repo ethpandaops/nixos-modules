@@ -188,6 +188,10 @@ in
     security.auditd.enable = true;
     security.audit = {
       enable = true;
+      # Records queued for auditd. Until auditd starts at boot nothing drains
+      # them, and NixOS's 1024 lost thousands on every boot (efresearch: 4430);
+      # RHEL's rules use 8192. Also the kernel's audit_backlog_limit= at boot.
+      backlogLimit = lib.mkDefault 8192;
       rules = [
         "-w /etc/passwd -p wa -k identity"
         "-w /etc/group -p wa -k identity"

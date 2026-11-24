@@ -65,6 +65,9 @@ in
         for check in protections:
             assert value(out, f'nixhost_kernel_protection{{check="{check}"}}') == 1, (check, out)
         assert "nixhost_kernel_protection_pending{" not in out, out
+        # monitoring.logs raises the audit backlog from NixOS's 1024.
+        server.succeed("grep -q 'audit_backlog_limit=8192' /proc/cmdline")
+        server.succeed("auditctl -s | grep -qx 'backlog_limit 8192'")
 
     with subtest("a command-line protection the kernel lacks is tampering, or pending if the booted system never had it"):
         server.succeed(
