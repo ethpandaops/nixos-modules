@@ -1,4 +1,5 @@
 # Is the remote branch ahead of what comin last deployed, and since when?
+# With a source branch (such as master), is it ahead of the deploy branch?
 # Also reports how old the running nixpkgs and nixos-modules are.
 now=$(date +%s)
 deployed=""
@@ -8,10 +9,17 @@ if [ -r "$STATE_DIR/deployed.json" ]; then
   deployed_at=$(jq -r .at "$STATE_DIR/deployed.json")
 fi
 
+branch=$(setting .branch)
+source=$(setting .sourceBranch)
 check_ok=0
 ahead=0
 since_file=$STATE_DIR/upstream-ahead-since
-if upstream=$(git_remote --exit-code "refs/heads/$(setting .branch)" | cut -f1) && [ -n "$upstream" ]; then
+source_since_file=$STATE_DIR/source-ahead-since
+refs=$(git_remote "refs/heads/$branch" ${source:+"refs/heads/$source"}) || refs=""
+upstream=$(awk -v ref="refs/heads/$branch" '$2 == ref { print $1 }' <<<"$refs")
+source_head=""
+[ -z "$source" ] || source_head=$(awk -v ref="refs/heads/$source" '$2 == ref { print $1 }' <<<"$refs")
+if [ -n "$upstream" ]; then
   check_ok=1
   if [ "$upstream" != "$deployed" ]; then
     ahead=1
@@ -21,6 +29,19 @@ if upstream=$(git_remote --exit-code "refs/heads/$(setting .branch)" | cut -f1) 
   fi
 else
   echo "could not read the remote branch"
+fi
+
+# The source branch differing from the deploy branch: commits that never
+# reached it. Right after a push it differs for as long as CI takes.
+source_ahead=""
+if [ -n "$upstream" ] && [ -n "$source_head" ]; then
+  if [ "$source_head" != "$upstream" ]; then
+    source_ahead=1
+    [ -s "$source_since_file" ] || echo "$now" >"$source_since_file"
+  else
+    source_ahead=0
+    rm -f "$source_since_file"
+  fi
 fi
 
 {
@@ -34,6 +55,16 @@ fi
     echo "# HELP nixhost_deploy_upstream_ahead_since_timestamp_seconds Since when the remote branch has been ahead."
     echo "# TYPE nixhost_deploy_upstream_ahead_since_timestamp_seconds gauge"
     echo "nixhost_deploy_upstream_ahead_since_timestamp_seconds $(cat "$since_file")"
+  fi
+  if [ -n "$source_ahead" ]; then
+    echo "# HELP nixhost_deploy_source_ahead Whether the source branch ($source) differs from the deploy branch."
+    echo "# TYPE nixhost_deploy_source_ahead gauge"
+    echo "nixhost_deploy_source_ahead $source_ahead"
+    if [ -s "$source_since_file" ]; then
+      echo "# HELP nixhost_deploy_source_ahead_since_timestamp_seconds Since when the source branch has differed from the deploy branch."
+      echo "# TYPE nixhost_deploy_source_ahead_since_timestamp_seconds gauge"
+      echo "nixhost_deploy_source_ahead_since_timestamp_seconds $(cat "$source_since_file")"
+    fi
   fi
   echo "# HELP nixhost_deploy_last_deployed_timestamp_seconds When comin last deployed successfully."
   echo "# TYPE nixhost_deploy_last_deployed_timestamp_seconds gauge"

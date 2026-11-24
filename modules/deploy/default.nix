@@ -13,6 +13,7 @@ let
   cfg = config.ethpandaops.deploy;
   hc = cfg.healthCheck;
   hostName = config.networking.hostName;
+  fw = config.networking.firewall;
 
   # comin's git client (go-git) logs in as auth.username, comin's default
   # "comin", not as the user in the URL; GitHub only accepts "git".
@@ -27,6 +28,7 @@ let
       inherit (cfg)
         repository
         branch
+        sourceBranch
         deployKeyFile
         knownHostsFile
         ;
@@ -41,6 +43,15 @@ let
           checkRemote
           ;
         sshPort = builtins.head config.services.openssh.ports;
+        # The NixOS firewall's rules, which a failed reload takes out.
+        firewall =
+          if !fw.enable then
+            null
+          else
+            {
+              kind = if config.networking.nftables.enable then "nftables" else "iptables";
+              ipv6 = config.networking.enableIPv6;
+            };
         extraScript = pkgs.writeShellScript "nixhost-health-check-extra" hc.extraScript;
       };
     }
@@ -76,8 +87,9 @@ let
       getent
       nix
     ])
+    ++ lib.optional fw.enable (if config.networking.nftables.enable then pkgs.nftables else fw.package)
   );
-  upstreamCheck = script "nixhost-deploy-lag" ./upstream-check.sh common;
+  upstreamCheck = script "nixhost-deploy-lag" ./upstream-check.sh (common ++ [ pkgs.gawk ]);
 in
 {
   imports = [
@@ -100,6 +112,18 @@ in
       type = lib.types.str;
       default = "deploy";
       description = "The branch comin deploys with switch. Only ever fast-forward it.";
+    };
+    sourceBranch = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "master";
+      description = ''
+        The branch the deploy branch is fast-forwarded from, if any. The lag
+        check then also reports it differing from the deploy branch
+        (nixhost_deploy_source_ahead*), which is how a commit that never
+        reached the deploy branch shows: a failed check, a failed or
+        cancelled deploy job.
+      '';
     };
     testingBranch = lib.mkOption {
       type = lib.types.str;
@@ -220,7 +244,8 @@ in
       };
     };
 
-    # Revision-lag watchdog: is the remote branch ahead of what comin deployed?
+    # Revision-lag watchdog: is the remote branch ahead of what comin deployed,
+    # and the source branch ahead of the deploy branch?
     systemd.services.nixhost-deploy-lag = {
       description = "Compare the deploy branch with the deployed commit";
       startLimitIntervalSec = 0;
