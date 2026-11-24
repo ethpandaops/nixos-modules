@@ -49,6 +49,7 @@ in
   drift = vmTest ./vm/drift.nix;
   logs = vmTest ./vm/logs.nix;
   vulnix = vmTest ./vm/vulnix.nix;
+  kernel = vmTest ./vm/kernel.nix;
   raid1-disks-bios = raid1Test false;
   raid1-disks-uefi = raid1Test true;
   comin-ssh = vmTest ./vm/comin-ssh.nix;
