@@ -53,10 +53,40 @@ Every box-side check writes `nixhost_*` metrics through node-exporter's
 textfile collector; alert rules live with the scraper, in platform's
 `nix-hosts-monitoring`.
 
+## Host repo CI
+
+A host repo's workflows call the reusable ones here, pinned by commit:
+
+| Workflow | What it does |
+| --- | --- |
+| `host-check.yaml` | the repo configures exactly the listed hosts, then `nix flake check` |
+| `host-deploy.yaml` | builds a host at a commit whose check passed and fast-forwards the branch comin pulls |
+| `host-update-nixpkgs.yaml` | moves nixpkgs to the newest channel release at least a day old |
+| `host-refresh-keys.yaml` | refreshes `keys/<login>.keys` from GitHub for the people already listed, with a webhook notice |
+| `host-bump-modules.yaml` | moves `nixos-modules` to the newest master commit whose check passed and that is old enough |
+
+```yaml
+jobs:
+  check:
+    uses: ethpandaops/nixos-modules/.github/workflows/host-check.yaml@<commit>
+    with:
+      hosts: myhost
+```
+
+Each one runs its script from `ci/` at the `nixos-modules` commit the
+caller's `flake.lock` pins (`nix run --inputs-from . nixos-modules#<script>`),
+so the logic moves with the lock and the workflow pin only carries the job
+wrapper; `GITHUB_TOKEN` can't edit workflow files, so pins move by hand. The
+jobs run with the caller's token and permissions and get only the secrets the
+caller passes. The pushing jobs push with `GITHUB_TOKEN`, which starts no
+workflow, so they dispatch the caller's `check.yaml`; a deploy caller starts
+on check's `workflow_run`. Each workflow's header has a caller example.
+
 ## Change
 
 Pull requests only: `master` needs a green `check`, which runs every flake
 check (the example server, each VM test, formatting and workflow lint) as
 its own job. `nix flake check -L` runs the same locally on x86_64-linux with
 KVM. A weekly workflow opens a pull request that updates the flake inputs.
-Hosts pick up a change when their repo bumps its `nixos-modules` lock.
+Hosts pick up a change when their repo bumps its `nixos-modules` lock, which
+`host-bump-modules` does on a schedule.

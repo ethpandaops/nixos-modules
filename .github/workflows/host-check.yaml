@@ -1,0 +1,30 @@
+# Reusable: a host repo's check, for every push and pull request. The repo
+# must configure exactly `hosts` (everything in it is readable from each box,
+# so it must never hold another server's configuration); then nix flake
+# check builds every check, the hosts' systems included. The logic is
+# ci/host-check.sh at the nixos-modules commit the caller's flake.lock pins.
+#
+#   jobs:
+#     check:
+#       uses: ethpandaops/nixos-modules/.github/workflows/host-check.yaml@<commit>
+#       with:
+#         hosts: myhost
+name: host-check
+on:
+  workflow_call:
+    inputs:
+      hosts:
+        description: The nixosConfigurations the repo must hold, space-separated (empty skips the guard)
+        type: string
+        default: ""
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+      - name: Check
+        env:
+          HOSTS: ${{ inputs.hosts }}
+        run: nix run --inputs-from . nixos-modules#host-check -- --hosts "$HOSTS"

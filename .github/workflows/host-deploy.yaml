@@ -1,0 +1,48 @@
+# Reusable: build a host's system at a commit whose check passed and
+# fast-forward the branch comin pulls to it (ci/host-deploy.sh at the
+# nixos-modules commit the caller's flake.lock pins). The caller decides when:
+#
+#   on:
+#     workflow_run: { workflows: [check], types: [completed], branches: [master] }
+#   jobs:
+#     deploy:
+#       if: github.event.workflow_run.conclusion == 'success'
+#       permissions: { contents: write }
+#       uses: ethpandaops/nixos-modules/.github/workflows/host-deploy.yaml@<commit>
+#       with: { host: myhost, sha: "${{ github.event.workflow_run.head_sha }}" }
+#
+# Give the caller no concurrency group: GitHub cancels a queued run when
+# another queues, which could drop the newest commit. Each push is a
+# fast-forward, so side-by-side runs are safe.
+name: host-deploy
+on:
+  workflow_call:
+    inputs:
+      host:
+        description: The nixosConfiguration to build
+        type: string
+        required: true
+      sha:
+        description: The commit to deploy
+        type: string
+        required: true
+      branch:
+        description: The branch comin pulls
+        type: string
+        default: deploy
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+      - name: Build and fast-forward ${{ inputs.branch }}
+        env:
+          HOST: ${{ inputs.host }}
+          SHA: ${{ inputs.sha }}
+          BRANCH: ${{ inputs.branch }}
+        run: nix run --inputs-from . nixos-modules#host-deploy -- --host "$HOST" --sha "$SHA" --branch "$BRANCH"

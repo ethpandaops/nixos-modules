@@ -88,6 +88,12 @@ in
       if keys == expected then "touch $out" else "echo 'fingerprint keys: ${toString keys}'; exit 1"
     );
 
+  # The CI scripts build, which shellchecks them.
+  ci = pkgs.symlinkJoin {
+    name = "ci";
+    paths = lib.attrValues self.packages.x86_64-linux;
+  };
+
   formatting = pkgs.runCommand "formatting" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
     cd ${self}
     find . -name '*.nix' -print0 | xargs -0 nixfmt --check

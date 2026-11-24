@@ -95,6 +95,9 @@
         ];
       };
 
+      # The scripts behind the reusable workflows, for host repos' CI (ci/).
+      packages.${system} = import ./ci { inherit pkgs lib; };
+
       formatter.${system} = pkgs.nixfmt-tree;
 
       checks.${system} = import ./tests {

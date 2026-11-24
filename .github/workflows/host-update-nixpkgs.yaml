@@ -1,0 +1,55 @@
+# Reusable: move nixpkgs to the newest release of its channel at least
+# `min-age-hours` old, build, commit and push (or open a pull request), then
+# start check (ci/update-nixpkgs.sh at the nixos-modules commit the caller's
+# flake.lock pins). The caller grants contents: write and actions: write
+# (pull-requests: write too for mode pr).
+#
+#   on:
+#     schedule: [{ cron: "17 4 * * *" }]
+#     workflow_dispatch:
+#   jobs:
+#     update:
+#       permissions: { contents: write, actions: write }
+#       uses: ethpandaops/nixos-modules/.github/workflows/host-update-nixpkgs.yaml@<commit>
+#       with: { build: myhost }
+name: host-update-nixpkgs
+on:
+  workflow_call:
+    inputs:
+      build:
+        description: Hosts whose systems to build first, space-separated
+        type: string
+        default: ""
+      min-age-hours:
+        description: How long a channel release has been out before it's taken
+        type: number
+        default: 24
+      branch:
+        type: string
+        default: master
+      mode:
+        description: push to the branch, or pr to open a pull request
+        type: string
+        default: push
+jobs:
+  update:
+    if: github.ref_name == inputs.branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+      - name: Update nixpkgs
+        env:
+          BUILD: ${{ inputs.build }}
+          MIN_AGE: ${{ inputs.min-age-hours }}
+          BRANCH: ${{ inputs.branch }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          nix run --inputs-from . nixos-modules#update-nixpkgs -- \
+            --build "$BUILD" --min-age-hours "$MIN_AGE" --branch "$BRANCH" --mode "$MODE"
