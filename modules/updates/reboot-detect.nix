@@ -1,14 +1,19 @@
 # Works out whether the box needs a reboot to run what is deployed: it
-# compares the booted system with /run/current-system for the kernel, initrd,
+# compares the booted system with the deployed one for the kernel, initrd,
 # kernel modules, kernel parameters and systemd, and, with
 # security.lockKernelModules, the modules loaded at boot. It only reports: the
-# standard /run/reboot-required sentinel (which tools such as kured read),
-# /run/nixhost/reboot/required.json and nixhost_reboot_pending* metrics.
-# reboot-interactive, or another tool, decides when to reboot.
+# standard /run/reboot-required sentinel (which tools such as kured read), the
+# same flag in /run/nixhost/reboot/reboot-required (a directory to mount into
+# kured), /run/nixhost/reboot/required.json and nixhost_reboot_pending*
+# metrics. reboot-interactive, or another tool, decides when to reboot.
 #
-# comin deploys the main branch with `switch`, so /run/current-system is also
-# what the box boots next. A `test` deploy from the testing branch can make it
-# report a reboot that would not change anything; that clears on the reboot.
+# The deployed system is /run/current-system, unless the bootloader's default
+# entry names a system that is neither running nor booted: then it was
+# deployed with `boot` (comin does that for a change named in
+# system.switch.inhibitors), none of it runs yet, and the reboot is needed
+# whatever changed (component boot-default). A `test` deploy from the testing
+# branch can make it report a reboot that would not change anything; that
+# clears on the reboot.
 {
   config,
   lib,
@@ -22,11 +27,14 @@ let
     runtimeInputs = with pkgs; [
       coreutils
       diffutils
+      gawk
       jq
+      systemd
     ];
     text = ''
       COMPONENTS=(${lib.escapeShellArgs cfg.components})
       ${config.ethpandaops.lib.shell}
+      ${config.ethpandaops.lib.bootDefault}
       ${builtins.readFile ./reboot-detect.sh}
     '';
   };

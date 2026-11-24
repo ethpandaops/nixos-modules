@@ -51,28 +51,6 @@ let
         )
       );
 
-  # Where the bootloader's default entry names its system. GRUB's first entry
-  # (default 0) and systemd-boot's default are the system the last
-  # switch-to-configuration switch or boot installed, whichever profile it
-  # came from; comin switches with its own profile, so
-  # /nix/var/nix/profiles/system is no guide.
-  grub = config.boot.loader.grub;
-  bootLoader =
-    if config.boot.loader.systemd-boot.enable then
-      { kind = "systemd-boot"; }
-    else if
-      grub.enable
-      && toString grub.default == "0"
-      && !grub.extraEntriesBeforeNixOS
-      && grub.mirroredBoots != [ ]
-    then
-      {
-        kind = "grub";
-        config = "${(lib.head grub.mirroredBoots).path}/grub/grub.cfg";
-      }
-    else
-      null;
-
   fw = config.networking.firewall;
   # proto:port and proto:from-to the firewall opens (everywhere or on one
   # interface), and sshd's ports: what may listen beyond loopback.
@@ -98,7 +76,6 @@ let
       inherit (cfg) etcDirs;
       etcIgnore = cfg.etcIgnore ++ initrdHostKeys;
       comin = config.services.comin.enable or false;
-      inherit bootLoader;
       listen = {
         # Plus the DHCP clients' and the mDNS responder's sockets, which
         # systemd-networkd and systemd-resolved open whatever the firewall says.
@@ -149,20 +126,27 @@ let
       '';
     };
 
-  drift = script "nixhost-drift" "SETTINGS=${settings}" ./drift.sh (
-    with pkgs;
-    [
-      coreutils
-      findutils
-      diffutils
-      gawk
-      gnugrep
-      iproute2
-      jq
-      systemd
-    ]
-    ++ lib.optional fw.enable (if config.networking.nftables.enable then nftables else fw.package)
-  );
+  drift =
+    script "nixhost-drift"
+      ''
+        SETTINGS=${settings}
+        ${config.ethpandaops.lib.bootDefault}
+      ''
+      ./drift.sh
+      (
+        with pkgs;
+        [
+          coreutils
+          findutils
+          diffutils
+          gawk
+          gnugrep
+          iproute2
+          jq
+          systemd
+        ]
+        ++ lib.optional fw.enable (if config.networking.nftables.enable then nftables else fw.package)
+      );
   sshLogins = script "nixhost-ssh-logins" "" ./ssh-logins.sh (
     with pkgs;
     [

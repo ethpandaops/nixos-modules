@@ -70,6 +70,24 @@ in
         "echo 'raid1-disks accepted a 6.18 kernel'; exit 1"
     );
 
+  # The keys rollouts read (nixos-utility's promoter classifies changes by them).
+  fingerprint =
+    let
+      keys = lib.attrNames server.config.ethpandaops.fingerprint;
+      expected = [
+        "inhibitors"
+        "initrd"
+        "kernel"
+        "kernelModules"
+        "kernelParams"
+        "systemd"
+        "toplevel"
+      ];
+    in
+    pkgs.runCommand "fingerprint" { } (
+      if keys == expected then "touch $out" else "echo 'fingerprint keys: ${toString keys}'; exit 1"
+    );
+
   formatting = pkgs.runCommand "formatting" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
     cd ${self}
     find . -name '*.nix' -print0 | xargs -0 nixfmt --check

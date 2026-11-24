@@ -125,6 +125,18 @@ in
             rb'syscall=321 [^\n]*auid=1001 [^\n]*comm="bpf-marker"[^\n]*key="bpf"', sink
         ), "no bpf record with the loader's login uid"
 
+    with subtest("a module loaded after boot counts as one the module lock would refuse"):
+        server.wait_for_unit("multi-user.target")
+        server.succeed("modprobe dummy")
+        def late(_):
+            server.succeed("systemctl start nixhost-kernel.service")
+            return 'nixhost_kernel_module_late_loads_total{module="dummy"} 1' in server.succeed("cat /var/lib/node-exporter/nixhost_kernel.prom")
+        retry(late, timeout_seconds=60)
+        out = server.succeed("cat /var/lib/node-exporter/nixhost_kernel.prom")
+        assert re.search(r"^nixhost_kernel_module_late_modules [1-9]", out, re.M), out
+        # Modules loaded at boot aren't late.
+        assert 'module="overlay"' not in out and 'module="ext4"' not in out, out
+
     with subtest("container output stays on the box"):
         server.succeed(
             "printf 'MESSAGE=marker-docker-output\\nCONTAINER_ID=abc\\n' | logger --journald",

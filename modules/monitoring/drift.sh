@@ -233,18 +233,6 @@ fi
 # deployed.json still report the deployment.
 deployed_file=/var/lib/nixhost-deploy/deployed.json
 
-# boot_default: the system the bootloader's default entry boots (its
-# init=/nix/store/<system>/init), or nothing if that can't be read.
-init_system() {
-  awk 'match($0, /init=\/nix\/store\/[^ ]*\/init/) { print substr($0, RSTART + 5, RLENGTH - 10); exit }'
-}
-boot_default() {
-  case $(jq -r '.bootLoader.kind // empty' "$SETTINGS") in
-  grub) init_system <"$(jq -r '.bootLoader.config' "$SETTINGS")" ;;
-  systemd-boot) bootctl list --json=short | jq -r 'first(.[] | select(.isDefault)) | .options // empty' | init_system ;;
-  esac
-}
-
 want=""
 [ ! -r "$deployed_file" ] || want=$(jq -r '.system // empty' "$deployed_file")
 if [ -n "$want" ]; then

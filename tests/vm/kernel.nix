@@ -40,6 +40,10 @@ in
       passwordFile = "${pkgs.writeText "otlp-password" "test"}";
     };
     security.lockKernelModules = true;
+    # A loader outside the Nix store, as in a container's image.
+    ethpandaops.monitoring.kernel.bpf.knownExecutables = [
+      "/run/known-loader/${pkgs.python3.executable}"
+    ];
   };
 
   testScript = ''
@@ -112,6 +116,15 @@ in
         assert re.search(r'^nixhost_bpf_last_unknown_load_timestamp_seconds\{exe="/nix/store/[^"]*/python3.13",comm="bpf-marker",auid="unset"\} \d+$', out, re.M), out
         # Each run counts only what is new.
         assert value(metrics(), 'nixhost_bpf_loads_total{loader="python3.13",known="false"}') == 1
+        # The same program copied outside the store, to a path in knownExecutables.
+        server.succeed(
+            "install -D ${pkgs.python3}/bin/${pkgs.python3.executable} /run/known-loader/${pkgs.python3.executable}",
+            "PYTHONHOME=${pkgs.python3} /run/known-loader/${pkgs.python3.executable} ${bpfLoad}",
+        )
+        retry(lambda _: 'loader="python3.13",known="true"' in metrics(), timeout_seconds=30)
+        out = metrics()
+        assert value(out, 'nixhost_bpf_loads_total{loader="python3.13",known="true"}') == 1, out
+        assert value(out, 'nixhost_bpf_loads_total{loader="python3.13",known="false"}') == 1, out
 
     with subtest("deleting an audit rule or turning auditing off is reported"):
         # The rule check leaves the 2 minutes after a load or activation alone;

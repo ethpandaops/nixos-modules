@@ -103,34 +103,61 @@ if [ "$(jq -r .audit "$SETTINGS")" = true ]; then
     } >>"$out"
   fi
 
-  # BPF program loads, from the audit records of the bpf rule (key "bpf",
-  # bpf(BPF_PROG_LOAD)) in the journal. A load by systemd (PID 1, for unit
-  # IP filters, device and filesystem restrictions) or by a program named in
-  # knownLoaders (an executable in the Nix store) is known; any other is not.
+  # From the audit records in the journal since the last run:
+  # - BPF program loads (the bpf rule, key "bpf", bpf(BPF_PROG_LOAD)). A load
+  #   by systemd (PID 1, for unit IP filters, device and filesystem
+  #   restrictions), by a program named in knownLoaders (an executable in the
+  #   Nix store) or by an executable in knownExecutables (an exact path, such
+  #   as one inside a container's image) is known; any other is not.
+  # - Kernel modules loaded after boot (KERN_MODULE records, from the modules
+  #   rule), counting from when multi-user.target was reached: what
+  #   security.lockKernelModules would refuse.
   counts_file=$STATE/bpf-loads
+  modules_file=$STATE/module-late-loads
   cursor_file=$STATE/bpf-cursor
   last_unknown_file=$STATE/bpf-last-unknown
-  declare -A counts=() known_names=()
+  declare -A counts=() known_names=() known_exes=() late=()
   while read -r name; do
     known_names[$name]=1
   done < <(jq -r '.knownLoaders[]' "$SETTINGS")
+  while read -r path; do
+    known_exes[$path]=1
+  done < <(jq -r '.knownExecutables[]' "$SETTINGS")
   counts["systemd true"]=${counts["systemd true"]:-0}
   if [ -r "$counts_file" ]; then
     while read -r loader known count; do
       counts["$loader $known"]=$count
     done <"$counts_file"
   fi
+  if [ -r "$modules_file" ]; then
+    while read -r module count; do
+      late[$module]=$count
+    done <"$modules_file"
+  fi
+  boot_id=$(cat /proc/sys/kernel/random/boot_id)
+  booted_at=$(systemctl show -p ActiveEnterTimestamp --value multi-user.target)
+  booted_at=$([ -z "$booted_at" ] || date -d "$booted_at" +%s)
   if [ -s "$cursor_file" ]; then
     since=(--after-cursor="$(cat "$cursor_file")")
   else
     since=(--boot)
   fi
   cursor=""
-  # One line per audit entry: its cursor, and for a successful bpf-key load
-  # the loading process.
-  while IFS=$'\x1f' read -r entry_cursor load pid exe comm auid at; do
+  # One line per audit entry: its cursor, its kind (bpf for a successful
+  # bpf-key load, module for a module load) and the details.
+  while IFS=$'\x1f' read -r entry_cursor kind pid exe comm auid at entry_boot module; do
     cursor=$entry_cursor
-    [ "$load" = 1 ] || continue
+    if [ "$kind" = module ]; then
+      # Earlier boots' records (the end of the last one) can't be placed.
+      if [ "$entry_boot" = "${boot_id//-/}" ] && [ -n "$booted_at" ] && [ "$at" -gt "$booted_at" ] && [ -n "$module" ]; then
+        if [ -z "${late[$module]+set}" ] && [ "${#late[@]}" -ge "$MAX_SERIES" ]; then
+          module=other
+        fi
+        late[$module]=$((${late[$module]:-0} + 1))
+      fi
+      continue
+    fi
+    [ "$kind" = bpf ] || continue
     loader=${exe##*/}
     loader=${loader#.}
     loader=${loader%-wrapped}
@@ -139,6 +166,8 @@ if [ "$(jq -r .audit "$SETTINGS")" = true ]; then
       known=true
       loader=systemd
     elif [[ $exe == /nix/store/* ]] && [ -n "${known_names[$loader]:-}" ]; then
+      known=true
+    elif [ -n "${known_exes[$exe]:-}" ]; then
       known=true
     fi
     if [ "$known" = false ]; then
@@ -153,14 +182,21 @@ if [ "$(jq -r .audit "$SETTINGS")" = true ]; then
     fi
     counts["$loader $known"]=$((${counts["$loader $known"]:-0} + 1))
   done < <(journalctl --quiet --no-pager --output=json "${since[@]}" _TRANSPORT=audit |
-    jq -r '[.__CURSOR,
-      (if (._AUDIT_FIELD_KEY // "" | ltrimstr("\"") | rtrimstr("\"")) == "bpf" and ._AUDIT_FIELD_SUCCESS == "yes" then 1 else 0 end),
+    jq -r 'def unquote: ltrimstr("\"") | rtrimstr("\"");
+      [.__CURSOR,
+      (if (._AUDIT_FIELD_KEY // "" | unquote) == "bpf" and ._AUDIT_FIELD_SUCCESS == "yes" then "bpf"
+       elif ._AUDIT_TYPE_NAME == "KERN_MODULE" then "module" else "" end),
       ._PID // "", ._EXE // "", ._COMM // "", ._AUDIT_LOGINUID // "unset",
-      ((.__REALTIME_TIMESTAMP | tonumber) / 1000000 | floor | tostring)] | join("\u001f")')
+      ((.__REALTIME_TIMESTAMP | tonumber) / 1000000 | floor | tostring),
+      ._BOOT_ID // "", (._AUDIT_FIELD_NAME // "" | unquote)] | join("\u001f")')
   for entry in "${!counts[@]}"; do
     echo "$entry ${counts[$entry]}"
   done | sort >"$counts_file.tmp"
   mv -f "$counts_file.tmp" "$counts_file"
+  for module in "${!late[@]}"; do
+    echo "$module ${late[$module]}"
+  done | sort >"$modules_file.tmp"
+  mv -f "$modules_file.tmp" "$modules_file"
   [ -z "$cursor" ] || echo "$cursor" >"$cursor_file"
   {
     echo "# HELP nixhost_bpf_loads_total BPF programs loaded, by loading program and whether it is a known loader."
@@ -174,6 +210,14 @@ if [ "$(jq -r .audit "$SETTINGS")" = true ]; then
       echo "# TYPE nixhost_bpf_last_unknown_load_timestamp_seconds gauge"
       echo "nixhost_bpf_last_unknown_load_timestamp_seconds{exe=\"$exe\",comm=\"$comm\",auid=\"$auid\"} $at"
     fi
+    echo "# HELP nixhost_kernel_module_late_modules Kernel modules loaded after boot (after multi-user.target): what security.lockKernelModules would refuse. Add each to boot.kernelModules (ethpandaops.kernelModules.allowlist) before locking."
+    echo "# TYPE nixhost_kernel_module_late_modules gauge"
+    echo "nixhost_kernel_module_late_modules ${#late[@]}"
+    echo "# HELP nixhost_kernel_module_late_loads_total Loads of each kernel module after boot, at most $MAX_SERIES modules."
+    echo "# TYPE nixhost_kernel_module_late_loads_total counter"
+    while read -r module count; do
+      echo "nixhost_kernel_module_late_loads_total{module=\"$(label "$module")\"} $count"
+    done <"$modules_file"
   } >>"$out"
 fi
 

@@ -1,8 +1,18 @@
-# Compare /run/booted-system with /run/current-system. COMPONENTS is set by
-# the module.
+# Compare /run/booted-system with the deployed system: /run/current-system,
+# or the bootloader's default when it is a system that is neither running
+# nor booted (deployed with `boot`). COMPONENTS is set by the module.
 RUN=/run/nixhost/reboot
 mkdir -p "$RUN"
 now=$(date +%s)
+
+target=/run/current-system
+boot_pending=""
+boot=$(boot_default 2>/dev/null || true)
+if [ -n "$boot" ] && [ -d "$boot" ] &&
+  [ "$boot" != "$(readlink -f /run/current-system)" ] && [ "$boot" != "$(readlink -f /run/booted-system)" ]; then
+  target=$boot
+  boot_pending=1
+fi
 
 # kernel_version <system>: from kernel-modules/lib/modules/<version>.
 kernel_version() {
@@ -22,9 +32,10 @@ store_name() {
 }
 
 changed=()
+[ -z "$boot_pending" ] || changed+=(boot-default)
 for component in "${COMPONENTS[@]}"; do
   booted=$(readlink -f "/run/booted-system/$component" || true)
-  current=$(readlink -f "/run/current-system/$component" || true)
+  current=$(readlink -f "$target/$component" || true)
   # A file in the system itself, such as kernel-params, is in each system's
   # own store path, so compare what it says.
   if [ "$booted" != "$current" ] &&
@@ -41,20 +52,20 @@ if [ "${#changed[@]}" -gt 0 ]; then
   jq -n \
     --argjson since "$since" \
     --arg booted_kernel "$(kernel_version /run/booted-system)" \
-    --arg new_kernel "$(kernel_version /run/current-system)" \
+    --arg new_kernel "$(kernel_version "$target")" \
     --arg booted_systemd "$(store_name /run/booted-system/systemd)" \
-    --arg new_systemd "$(store_name /run/current-system/systemd)" \
+    --arg new_systemd "$(store_name "$target/systemd")" \
     '{required: true, $since, components: $ARGS.positional,
       kernel: {booted: $booted_kernel, new: $new_kernel},
       systemd: {booted: $booted_systemd, new: $new_systemd}}' \
     --args "${changed[@]}" >"$RUN/required.json.tmp"
   mv -f "$RUN/required.json.tmp" "$RUN/required.json"
   printf '%s\n' "${changed[@]}" >/run/reboot-required.components
-  touch /run/reboot-required
+  touch /run/reboot-required "$RUN/reboot-required"
   echo "reboot needed for: ${changed[*]} (since $(date -u -d "@$since"))"
 else
   echo '{"required": false}' >"$RUN/required.json"
-  rm -f /run/reboot-required /run/reboot-required.components
+  rm -f /run/reboot-required /run/reboot-required.components "$RUN/reboot-required"
   echo "no reboot needed"
 fi
 
