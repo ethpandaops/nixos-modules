@@ -10,9 +10,10 @@ lib.types.submodule {
         "webhook"
       ];
       description = ''
-        How to deliver: `discord` posts `{"content": ...}` to a Discord webhook,
-        `ntfy` posts the text to an ntfy topic URL, and `webhook` posts
-        `{"text": ...}` (Slack-compatible) to any URL.
+        How to deliver: `discord` posts an embed to a Discord webhook (a Slack
+        attachment to its /slack form), `ntfy` posts the text with a title and
+        priority to an ntfy topic URL, and `webhook` posts a Slack-compatible
+        attachment to any URL. Each posts under the host's name.
       '';
     };
     url = lib.mkOption {

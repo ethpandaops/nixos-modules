@@ -19,9 +19,39 @@
 }:
 let
   cfg = config.ethpandaops.raid1;
-  mdadmEvent = pkgs.writeShellScriptBin "nixhost-mdadm-event" ''
-    exec ${lib.getExe config.ethpandaops.notify.package} admins "mdadm: $1 on $2 ''${3:-}"
-  '';
+  # mdadm's PROGRAM: <event> <md device> [<component device>]. Events that
+  # need someone are sent with the array's /proc/mdstat lines; NewArray
+  # (every array at every boot) and RebuildNN (progress) aren't news.
+  mdadmEvent = pkgs.writeShellApplication {
+    name = "nixhost-mdadm-event";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.gawk
+    ];
+    text = ''
+      event=$1 array=$2 member=''${3:-}
+      case "$event" in
+      Fail) severity=critical title="RAID member failed" ;;
+      FailSpare) severity=critical title="RAID spare failed while rebuilding" ;;
+      DegradedArray) severity=critical title="RAID array degraded" ;;
+      DeviceDisappeared) severity=critical title="RAID array disappeared" ;;
+      SparesMissing) severity=warning title="RAID array missing spares" ;;
+      RebuildStarted) severity=info title="RAID rebuild started" ;;
+      RebuildFinished) severity=ok title="RAID rebuild finished" ;;
+      SpareActive) severity=ok title="RAID spare in use" ;;
+      MoveSpare) severity=info title="RAID spare moved" ;;
+      TestMessage) severity=info title="RAID alert test" ;;
+      *) exit 0 ;;
+      esac
+      name=$(basename "$(readlink -f "$array")")
+      details="mdadm: $event on $array''${member:+ ($member)}"
+      if mdstat=$(awk -v md="$name" '$1 == md { found = 1 } found && NF == 0 { exit } found' /proc/mdstat) &&
+        [ -n "$mdstat" ]; then
+        details+=$'\n```\n'"$mdstat"$'\n```'
+      fi
+      exec ${lib.getExe config.ethpandaops.notify.package} --severity "$severity" --title "$title" admins "$details"
+    '';
+  };
 in
 {
   imports = [ ./notify.nix ];

@@ -21,6 +21,9 @@ git_remote() {
   fi
 }
 
+# notify_admins <critical|warning|info|ok> <title> <message>
 notify_admins() {
-  "$NOTIFY" admins "$*" || true
+  local severity=$1 title=$2
+  shift 2
+  "$NOTIFY" --severity "$severity" --title "$title" admins "$*" || true
 }

@@ -59,6 +59,8 @@
   testScript =
     { nodes, ... }:
     ''
+      import json
+
       post_deploy = "${nodes.machine.services.comin.postDeploymentCommand}"
 
       def deployed(status, sha):
@@ -108,9 +110,25 @@
           machine.succeed("grep -q 'sshd-not-listening-on-22) after deploying 222222222222; rolling back' /var/lib/notify-sink.log")
           machine.succeed("grep -q 'checks pass again' /var/lib/notify-sink.log")
 
-      with subtest("Discord gets the body each endpoint wants, and a rejection is logged with its reason"):
-          machine.succeed("grep -q '^/api/webhooks/1/native {\"content\":\"\\[machine\\] health check failed' /var/lib/notify-sink.log")
-          machine.succeed("grep -q '^/api/webhooks/2/compat/slack {\"text\":\"\\[machine\\] health check failed' /var/lib/notify-sink.log")
+      with subtest("Discord gets an embed, or a Slack attachment on /slack, under the host's name; a rejection is logged with its reason"):
+          sent = [line.split(" ", 1) for line in machine.succeed("cat /var/lib/notify-sink.log").splitlines()]
+          def notice(path, title):
+              bodies = [json.loads(body) for p, body in sent if p == path]
+              key = "embeds" if "embeds" in bodies[0] else "attachments"
+              return next(b for b in bodies if b[key][0]["title"] == title)
+          native = notice("/api/webhooks/1/native", "Health check failed: rolling back")
+          assert native["username"] == "machine", native
+          assert native["allowed_mentions"] == {"parse": []}, native
+          embed = native["embeds"][0]
+          assert embed["description"].startswith("Health check failed (sshd-not-listening-on-22) after deploying 222222222222; rolling back to /nix/store/"), embed
+          assert embed["color"] == 15770634, embed
+          assert {"name": "Host", "value": "machine", "inline": True} in embed["fields"], embed
+          assert {"name": "Severity", "value": "warning", "inline": True} in embed["fields"], embed
+          slack = notice("/api/webhooks/2/compat/slack", "Deploy rolled back")
+          assert slack["username"] == "machine", slack
+          attachment = slack["attachments"][0]
+          assert attachment["color"] == "#F0A30A" and attachment["text"].startswith("Rolled back to /nix/store/"), attachment
+          assert {"title": "Host", "value": "machine", "short": True} in attachment["fields"], attachment
           machine.fail("journalctl -t nixhost-notify | grep -q 'delivery to a discord target failed'")
           machine.succeed("journalctl -t nixhost-notify | grep -q 'delivery to a webhook target failed: .*Cannot send an empty message'")
 
@@ -145,7 +163,7 @@
           machine.wait_until_succeeds("grep -qx 'nixhost_healthcheck_rollbacks_total 2' /var/lib/node-exporter/nixhost_healthcheck.prom", timeout=240)
           check_finished()
           assert machine.succeed("readlink -f /run/current-system").strip() == other
-          machine.succeed(f"grep -q 'rolled back to {other}; checks pass again' /var/lib/notify-sink.log")
+          machine.succeed(f"grep -q 'Rolled back to {other}; the checks pass again' /var/lib/notify-sink.log")
 
       with subtest("a firewall without its rules fails the check"):
           machine.succeed("iptables -w -D INPUT -j nixos-fw")
