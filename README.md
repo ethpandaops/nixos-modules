@@ -1,3 +1,62 @@
 # nixos-modules
 
-NixOS modules.
+NixOS modules for ethPandaOps servers: hardened SSH access for a fixed list
+of people, sops secrets, pull-based deploys with a health check that rolls
+back, reboots that tell people first, and monitoring, drift checks and log
+shipping over a tailnet. Every module is tested in a NixOS VM in CI.
+
+## Use
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    nixos-modules = {
+      url = "github:ethpandaops/nixos-modules";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+  outputs = { nixpkgs, nixos-modules, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        nixos-modules.nixosModules.default
+        nixos-modules.nixosModules.static-network # bare metal with a static uplink
+        nixos-modules.nixosModules.raid1-disks # two or more mirrored disks
+        nixos-modules.nixosModules.reboot-interactive # a box people work on
+        ./configuration.nix
+      ];
+    };
+  };
+}
+```
+
+`configuration.nix` sets values under `ethpandaops.*`. Read each module's
+header comment and options for the details; the smallest complete example
+is [tests/server.nix](tests/server.nix).
+
+## Modules
+
+| Module | What it does |
+| --- | --- |
+| `default` | `base`, `users`, `secrets`, `deploy`, `reboot-detect` and `monitoring`: what every server gets |
+| `base` | srvos's server profile plus key-only SSH for group `ssh-users`, passwordless sudo for `wheel`, Nix GC, persistent journal, kernel and network hardening |
+| `users` | `ethpandaops.users.<name>`: fixed UID, SSH keys, sudo, expiry, notify targets |
+| `secrets` | sops-nix with the host's SSH ed25519 key as its age identity |
+| `deploy` | comin pulls a deploy branch; after each deployment a health check (sshd, route, firewall, DNS, git remote) rolls back to the last good system if the deploy broke the box |
+| `reboot-detect` | reports when the deployed system needs a reboot (kernel, initrd, modules, kernel parameters, systemd) |
+| `reboot-interactive` | reboots in a nightly window when nobody is logged in, or at a deadline, with notices and `reboot-status`, `reboot-hold`, `reboot-at`, `reboot-now`; a new kernel series waits for an admin |
+| `monitoring` | node-exporter and comin's exporter on the tailnet only; drift, SSH-login, kernel-protection and BPF metrics; optional journal shipping over OTLP (`monitoring.logs`) and a daily vulnix scan (`monitoring.vulnix`); host labels (`ethpandaops.host`) |
+| `static-network` | a static, MAC-matched uplink with systemd-networkd |
+| `raid1-disks` | disko layout: mdadm RAID1 for the ESP and root on every listed disk, GRUB on each |
+
+Every box-side check writes `nixhost_*` metrics through node-exporter's
+textfile collector; alert rules live with the scraper, in platform's
+`nix-hosts-monitoring`.
+
+## Change
+
+Pull requests only: `master` needs a green `check`, which runs every flake
+check (the example server, each VM test, formatting and workflow lint) as
+its own job. `nix flake check -L` runs the same locally on x86_64-linux with
+KVM. A weekly workflow opens a pull request that updates the flake inputs.
+Hosts pick up a change when their repo bumps its `nixos-modules` lock.

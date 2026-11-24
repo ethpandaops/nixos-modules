@@ -75,9 +75,11 @@ let
           ntfy) body=$message; ctype=text/plain ;;
         esac
         # On failure, log curl's error and the start of the reply, on one line.
+        # The URL, often a secret, goes in on stdin rather than in the
+        # command line, which any local user can read.
         response=$(mktemp)
-        if ! error=$(curl -sS --fail-with-body --max-time 15 --retry 3 --retry-delay 5 -o "$response" \
-          -H "Content-Type: $ctype" --data-binary "$body" "$url" 2>&1); then
+        if ! error=$(printf 'url = "%s"\n' "''${url//\"/%22}" | curl -sS --fail-with-body --max-time 15 --retry 3 --retry-delay 5 \
+          -o "$response" -H "Content-Type: $ctype" --data-binary "$body" --config - 2>&1); then
           reply=$(head -c 300 "$response")
           logger -t nixhost-notify -- "delivery to a $type target failed: ''${error//$'\n'/ } ''${reply//$'\n'/ }"
         fi

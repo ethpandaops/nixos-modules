@@ -2,7 +2,8 @@
 # - nixhost_kernel_protection{check}: each protection the configuration turns
 #   on, 1 while in force: kernel module loading off (lockKernelModules), kexec
 #   off (protectKernelImage), the kernel command line's nohibernate and
-#   audit=1, and the audit system enabled. A command-line protection that the
+#   audit=1, the audit system enabled, and the NixOS firewall's rules loaded
+#   (a failed firewall reload takes them out). A command-line protection that the
 #   booted system didn't have yet is nixhost_kernel_protection_pending until
 #   the reboot.
 # - nixhost_audit_rules_changed{,_info}: audit rules added or deleted since
@@ -20,6 +21,8 @@
 let
   cfg = config.ethpandaops.monitoring.kernel;
   auditOn = config.security.audit.enable != false;
+  fw = config.networking.firewall;
+  nftables = config.networking.nftables.enable;
 
   checks =
     lib.optional config.security.lockKernelModules {
@@ -41,6 +44,16 @@ let
         arg = "nohibernate";
       }
     ]
+    ++ lib.optional fw.enable {
+      check = "firewall";
+      kind = "firewall";
+      # The commands whose rules jump to nixos-fw, or nftables.
+      arg =
+        if nftables then
+          "nftables"
+        else
+          lib.concatStringsSep " " ([ "iptables" ] ++ lib.optional config.networking.enableIPv6 "ip6tables");
+    }
     ++ lib.optionals auditOn [
       {
         check = "cmdline:audit=1";
@@ -72,7 +85,8 @@ let
       pkgs.jq
       pkgs.systemd
     ]
-    ++ lib.optional auditOn config.security.audit.package;
+    ++ lib.optional auditOn config.security.audit.package
+    ++ lib.optional fw.enable (if nftables then pkgs.nftables else fw.package);
     text = ''
       SETTINGS=${settings}
       ${config.ethpandaops.lib.shell}
