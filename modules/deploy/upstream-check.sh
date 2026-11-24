@@ -79,5 +79,8 @@ fi
     echo "# HELP nixhost_modules_last_modified_timestamp_seconds Commit date of the running nixos-modules."
     echo "# TYPE nixhost_modules_last_modified_timestamp_seconds gauge"
     echo "nixhost_modules_last_modified_timestamp_seconds $(jq -r .lastModified /etc/nixhost/modules.json)"
+    echo "# HELP nixhost_modules_info The running nixos-modules commit."
+    echo "# TYPE nixhost_modules_info gauge"
+    echo "nixhost_modules_info{rev=\"$(jq -r '.rev | gsub("[^0-9a-z]"; "")' /etc/nixhost/modules.json)\"} 1"
   fi
 } | write_metrics nixhost_deploy

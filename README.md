@@ -39,11 +39,11 @@ is [tests/server.nix](tests/server.nix).
 | Module | What it does |
 | --- | --- |
 | `default` | `base`, `users`, `secrets`, `deploy`, `reboot-detect` and `monitoring`: what every server gets |
-| `base` | srvos's server profile plus key-only SSH for group `ssh-users`, passwordless sudo for `wheel`, Nix GC, persistent journal, kernel and network hardening |
+| `base` | srvos's server profile plus key-only SSH for group `ssh-users`, passwordless sudo for `wheel`, Nix GC, persistent journal, kernel and network hardening, and the module lock (`ethpandaops.kernelModules`: collect what loads after boot, then lock) |
 | `users` | `ethpandaops.users.<name>`: fixed UID, SSH keys, sudo, expiry, notify targets |
 | `secrets` | sops-nix with the host's SSH ed25519 key as its age identity |
-| `deploy` | comin pulls a deploy branch; after each deployment a health check (sshd, route, firewall, DNS, git remote) rolls back to the last good system if the deploy broke the box |
-| `reboot-detect` | reports when the deployed system needs a reboot (kernel, initrd, modules, kernel parameters, systemd) |
+| `deploy` | comin pulls a deploy branch; after each deployment a health check (sshd, route, firewall, DNS, git remote) rolls back to the last good system if the deploy broke the box. `ethpandaops.fingerprint` is what a rollout compares between commits to classify a change |
+| `reboot-detect` | reports when the deployed system needs a reboot (kernel, initrd, modules, kernel parameters, systemd, or a system set to boot that isn't running yet), as `/run/reboot-required` for tools such as kured |
 | `reboot-interactive` | reboots in a nightly window when nobody is logged in, or at a deadline, with notices and `reboot-status`, `reboot-hold`, `reboot-at`, `reboot-now`; a new kernel series waits for an admin |
 | `monitoring` | node-exporter and comin's exporter on the tailnet only; drift, SSH-login, kernel-protection and BPF metrics; optional journal shipping over OTLP (`monitoring.logs`) and a daily vulnix scan (`monitoring.vulnix`); host labels (`ethpandaops.host`) |
 | `static-network` | a static, MAC-matched uplink with systemd-networkd |

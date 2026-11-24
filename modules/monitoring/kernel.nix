@@ -10,8 +10,14 @@
 #   audit-rules-nixos loaded them, nixhost_audit_lost and nixhost_audit_backlog:
 #   how someone would hide what the audit rules record.
 # - nixhost_bpf_loads_total{loader,known}: BPF programs loaded, from the audit
-#   rule with key bpf (monitoring.logs). systemd (PID 1) and the programs in
-#   bpf.knownLoaders are known loaders; any other load is worth a look.
+#   rule with key bpf (monitoring.logs). systemd (PID 1), the programs in
+#   bpf.knownLoaders and the executables in bpf.knownExecutables are known
+#   loaders; any other load is worth a look.
+# - nixhost_kernel_module_late_loads_total{module}: modules loaded after boot
+#   (once multi-user.target is reached and udev has settled, when the lock
+#   would engage), from the audit rule with key modules (monitoring.logs).
+#   That's what security.lockKernelModules would refuse, so it's the list to
+#   load at boot before turning the lock on (ethpandaops.kernelModules).
 {
   config,
   lib,
@@ -71,7 +77,7 @@ let
     builtins.toJSON {
       inherit checks;
       audit = auditOn;
-      inherit (cfg.bpf) knownLoaders;
+      inherit (cfg.bpf) knownLoaders knownExecutables;
     }
   );
 
@@ -121,6 +127,18 @@ in
         device filters for every container.
       '';
     };
+    bpf.knownExecutables = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "/usr/bin/falco" ];
+      description = ''
+        Executables whose BPF loads are expected, by exact path as the audit
+        record shows it, for loaders outside the Nix store. Inside a container
+        that is the path in its image, such as /usr/bin/falco. Any container
+        can put a program at that path, so this quiets an expected loader; it
+        doesn't prove which program loaded.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -140,6 +158,27 @@ in
         OnBootSec = "1min";
         OnUnitActiveSec = "1min";
       };
+    };
+    # When security.lockKernelModules would lock: NixOS's
+    # disable-kernel-module-loading runs after multi-user.target and waits
+    # for udev to settle, so drivers udev is still loading at
+    # multi-user.target aren't refused. Module loads count as late from here.
+    systemd.services.nixhost-module-lock-point = {
+      description = "Mark when security.lockKernelModules locks module loading";
+      wants = [ "systemd-udevd.service" ];
+      wantedBy = [ config.systemd.defaultUnit ];
+      after = [
+        "firewall.service"
+        "systemd-modules-load.service"
+        "disable-kernel-module-loading.service"
+        config.systemd.defaultUnit
+      ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        TimeoutSec = 180;
+      };
+      script = "${config.systemd.package}/bin/udevadm settle || true";
     };
   };
 }

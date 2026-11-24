@@ -125,6 +125,22 @@ in
             rb'syscall=321 [^\n]*auid=1001 [^\n]*comm="bpf-marker"[^\n]*key="bpf"', sink
         ), "no bpf record with the loader's login uid"
 
+    with subtest("a module loaded after boot counts as one the module lock would refuse"):
+        server.wait_for_unit("nixhost-module-lock-point.service")
+        # An audit record with unprintable bytes, which journalctl writes as an
+        # array, before the load doesn't stop the count at that entry.
+        server.succeed("sh -c 'printf \"bad\\001name\" > /proc/self/comm && echo >> /etc/sudoers'")
+        server.wait_until_succeeds("journalctl _TRANSPORT=audit -o json | jq -e -s 'any(.[]; ._COMM | type == \"array\")'", timeout=30)
+        server.succeed("modprobe dummy")
+        def late(_):
+            server.succeed("systemctl start nixhost-kernel.service")
+            return 'nixhost_kernel_module_late_loads_total{module="dummy"} 1' in server.succeed("cat /var/lib/node-exporter/nixhost_kernel.prom")
+        retry(late, timeout_seconds=60)
+        out = server.succeed("cat /var/lib/node-exporter/nixhost_kernel.prom")
+        # Modules loaded at boot aren't late, nor are the drivers udev was
+        # still loading when multi-user.target was reached.
+        assert re.search(r"^nixhost_kernel_module_late_modules 1$", out, re.M), out
+
     with subtest("container output stays on the box"):
         server.succeed(
             "printf 'MESSAGE=marker-docker-output\\nCONTAINER_ID=abc\\n' | logger --journald",

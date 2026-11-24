@@ -1,4 +1,5 @@
 # The reboot policy end to end, driving the clock by hand:
+# - a system set to boot that isn't running yet (a `boot` deploy) needs one;
 # - a kernel change shows up in the login message, the prompt and notices;
 # - in the window, a login, an inhibitor or a hold each stop the reboot;
 # - with nothing in the way the box reboots, and says so when it's back;
@@ -39,6 +40,8 @@ in
     };
     # The test sets the clock itself.
     services.timesyncd.enable = false;
+    # A system to name as the boot default.
+    specialisation.params.configuration.boot.kernelParams = [ "nixhost.test=1" ];
   };
 
   testScript = ''
@@ -105,6 +108,27 @@ in
             "systemctl start nixhost-reboot-detect.service",
             "test ! -e /run/reboot-required",
             "ln -sfn $(readlink -f /run/booted-system) /run/current-system",
+        )
+
+    with subtest("a system set to boot that isn't running yet needs a reboot"):
+        # What comin's `boot` deploy leaves: the bootloader's default entry
+        # names a system that neither runs nor booted.
+        params = machine.succeed("readlink -f /run/booted-system/specialisation/params").strip()
+        machine.succeed(
+            "mkdir -p /boot/grub",
+            f"printf '%s\\n' 'menuentry \"NixOS\" {{' '  linux /kernels/bzImage init={params}/init' '}}' > /boot/grub/grub.cfg",
+            "systemctl start nixhost-reboot-detect.service",
+        )
+        assert machine.succeed("cat /run/reboot-required.components").split() == ["boot-default", "kernel-params"]
+        machine.succeed("test -e /run/nixhost/reboot/reboot-required")
+        # The booted system as the boot default: nothing waits.
+        booted = machine.succeed("readlink -f /run/booted-system").strip()
+        machine.succeed(
+            f"printf '%s\\n' 'menuentry \"NixOS\" {{' '  linux /kernels/bzImage init={booted}/init' '}}' > /boot/grub/grub.cfg",
+            "systemctl start nixhost-reboot-detect.service",
+            "test ! -e /run/reboot-required",
+            "test ! -e /run/nixhost/reboot/reboot-required",
+            "rm /boot/grub/grub.cfg",
         )
 
     with subtest("a kernel change is detected and announced"):

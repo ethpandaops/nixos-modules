@@ -51,6 +51,7 @@
         base = module "base" [
           srvos.nixosModules.server
           ./modules/base.nix
+          ./modules/kernel-modules.nix
         ];
         users = module "users" [ ./modules/users.nix ];
         secrets = module "secrets" [
@@ -67,6 +68,7 @@
             };
           }
           ./modules/deploy
+          ./modules/fingerprint.nix
         ];
         reboot-detect = module "reboot-detect" [ ./modules/updates/reboot-detect.nix ];
         reboot-interactive = module "reboot-interactive" [
