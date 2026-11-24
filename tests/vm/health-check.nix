@@ -1,8 +1,9 @@
-# The post-deploy health check, with its real sshd, route, DNS and git
-# checks: a healthy deployment becomes the last good system; a deployment
+# The post-deploy health check, with its real sshd, route, firewall, DNS and
+# git checks: a healthy deployment becomes the last good system; a deployment
 # that breaks SSH is rolled back to it; when the checks fail on both, the
-# deployed system stays. The admins hear about each through Discord-style
-# webhooks.
+# deployed system stays; an outage outside the box that ends during the
+# rollback doesn't undo the deploy, but a deploy that breaks DNS is rolled
+# back. The admins hear about each through Discord-style webhooks.
 { self, lib, ... }:
 {
   name = "health-check";
@@ -18,6 +19,7 @@
       ethpandaops.deploy = {
         # A local repo stands in for GitHub; comin itself isn't run here.
         repository = "/var/lib/remote.git";
+        sourceBranch = "master";
         deployKeyFile = null;
         healthCheck = {
           timeout = 15;
@@ -48,6 +50,7 @@
       ];
       specialisation.broken.configuration.services.openssh.enable = lib.mkForce false;
       specialisation.other.configuration.environment.etc."health-check-test".text = "other";
+      specialisation.nodns.configuration.networking.hosts."192.0.2.1" = lib.mkForce [ ];
       # Flake-built systems carry the nixpkgs commit date in their version
       # (the test framework forces "test", so override at a higher priority).
       system.nixos.versionSuffix = lib.mkOverride 10 ".20300101.0000000";
@@ -75,6 +78,10 @@
           "git init -q -b deploy /tmp/work",
           "git -C /tmp/work -c user.name=t -c user.email=t@example.org commit -q --allow-empty -m init",
           "git clone -q --bare /tmp/work /var/lib/remote.git",
+          # master, the source branch, has a commit deploy doesn't.
+          "git -C /tmp/work checkout -q -b master",
+          "git -C /tmp/work -c user.name=t -c user.email=t@example.org commit -q --allow-empty -m next",
+          "git -C /tmp/work push -q /var/lib/remote.git master",
       )
       good = machine.succeed("readlink -f /run/current-system").strip()
 
@@ -118,10 +125,44 @@
           machine.succeed("grep -qx 'nixhost_healthcheck_ok 0' /var/lib/node-exporter/nixhost_healthcheck.prom")
           machine.succeed("rm /run/fail-health")
 
-      with subtest("the lag check sees the remote branch ahead of the deployed commit"):
+      with subtest("an outage outside the box that ends during the rollback doesn't undo the deploy"):
+          # The git remote is gone while the deployed system is checked and back for the older one.
+          machine.succeed("mv /var/lib/remote.git /var/lib/remote.git.away")
+          deployed("done", "4444444444444444")
+          machine.wait_until_succeeds("grep -q 'git-remote) after deploying 444444444444; rolling back' /var/lib/notify-sink.log", timeout=120)
+          machine.succeed("mv /var/lib/remote.git.away /var/lib/remote.git")
+          machine.wait_until_succeeds("grep -q 'passes on it again: something outside the box' /var/lib/notify-sink.log", timeout=180)
+          check_finished()
+          assert machine.succeed("readlink -f /run/current-system").strip() == other
+          assert machine.succeed("readlink /var/lib/nixhost-deploy/last-good").strip() == other
+          machine.succeed("grep -qx 'nixhost_healthcheck_rollbacks_total 1' /var/lib/node-exporter/nixhost_healthcheck.prom")
+
+      with subtest("a deploy that breaks DNS is rolled back after a second try"):
+          nodns = machine.succeed(f"readlink -f {good}/specialisation/nodns").strip()
+          machine.succeed(f"{nodns}/bin/switch-to-configuration test")
+          deployed("done", "5555555555555555")
+          machine.wait_until_succeeds("grep -q 'dns-github.com) after deploying 555555555555; rolling back' /var/lib/notify-sink.log", timeout=120)
+          machine.wait_until_succeeds("grep -qx 'nixhost_healthcheck_rollbacks_total 2' /var/lib/node-exporter/nixhost_healthcheck.prom", timeout=240)
+          check_finished()
+          assert machine.succeed("readlink -f /run/current-system").strip() == other
+          machine.succeed(f"grep -q 'rolled back to {other}; checks pass again' /var/lib/notify-sink.log")
+
+      with subtest("a firewall without its rules fails the check"):
+          machine.succeed("iptables -w -D INPUT -j nixos-fw")
+          deployed("done", "6666666666666666")
+          machine.wait_until_succeeds("grep -q 'firewall-off) after deploying 666666666666' /var/lib/notify-sink.log", timeout=120)
+          check_finished("exit-code")
+          machine.succeed("systemctl reload firewall", "iptables -w -C INPUT -j nixos-fw")
+
+      with subtest("the lag check sees the remote branch ahead of the deployed commit, and master ahead of deploy"):
           machine.succeed("systemctl start nixhost-deploy-lag.service")
           machine.succeed("grep -qx 'nixhost_deploy_upstream_check_ok 1' /var/lib/node-exporter/nixhost_deploy.prom")
           machine.succeed("grep -qx 'nixhost_deploy_upstream_ahead 1' /var/lib/node-exporter/nixhost_deploy.prom")
+          machine.succeed("grep -qx 'nixhost_deploy_source_ahead 1' /var/lib/node-exporter/nixhost_deploy.prom")
+          machine.succeed("grep -q '^nixhost_deploy_source_ahead_since_timestamp_seconds ' /var/lib/node-exporter/nixhost_deploy.prom")
+          machine.succeed("git -C /tmp/work push -q /var/lib/remote.git master:deploy", "systemctl start nixhost-deploy-lag.service")
+          machine.succeed("grep -qx 'nixhost_deploy_source_ahead 0' /var/lib/node-exporter/nixhost_deploy.prom")
+          machine.fail("grep -q '^nixhost_deploy_source_ahead_since' /var/lib/node-exporter/nixhost_deploy.prom")
           machine.succeed("grep -qx 'nixhost_nixpkgs_last_modified_timestamp_seconds 1893456000' /var/lib/node-exporter/nixhost_deploy.prom")
     '';
 }
