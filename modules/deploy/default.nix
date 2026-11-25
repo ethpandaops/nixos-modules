@@ -249,7 +249,8 @@ in
     # here; ethpandaops.reboot.trial runs it after every boot and hooks its
     # OnSuccess= and OnFailure=. It runs once the module lock is in force
     # (nixhost-module-lock-point, from monitoring), so a module the lock
-    # refuses shows up as a failing check.
+    # refuses shows up as a failing check. It runs once per boot: a switch
+    # starts multi-user.target again, which would otherwise run it again.
     systemd.services.nixhost-boot-check = lib.mkIf hc.enable {
       description = "Check the box after a boot";
       wants = [ "network-online.target" ];
@@ -260,8 +261,10 @@ in
         "nixhost-module-lock-point.service"
       ];
       restartIfChanged = false;
+      unitConfig.ConditionPathExists = "!/run/nixhost-boot-check.started";
       serviceConfig = {
         Type = "oneshot";
+        ExecStartPre = "${pkgs.coreutils}/bin/touch /run/nixhost-boot-check.started";
         ExecStart = "${lib.getExe healthCheck} boot";
       };
     };

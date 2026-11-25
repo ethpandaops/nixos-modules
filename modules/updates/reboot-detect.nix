@@ -15,10 +15,11 @@
 # branch can make it report a reboot that would not change anything; that
 # clears on the reboot.
 #
-# With ethpandaops.reboot.trial, a deployed system whose trial boot failed
-# holds its reboot: required.json says so (held: trial-reverted) and so does
-# nixhost_reboot_pending_held, but the sentinels stay down, so kured doesn't
-# reboot the box into the confirmed system over and over.
+# With ethpandaops.reboot.trial, a reboot that would only boot the confirmed
+# system again is held: the deployed system's trial failed (held:
+# trial-reverted), or no trial of it could be armed (trial-not-armed).
+# required.json and nixhost_reboot_pending_held say so, but the sentinels
+# stay down, so kured doesn't reboot the box over and over.
 {
   config,
   lib,

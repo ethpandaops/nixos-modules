@@ -4,30 +4,53 @@
 #
 # - Any orderly shutdown arms the trial (nixhost-boot.service's ExecStop),
 #   whoever reboots: the reboot policy, kured, an admin. A crash or a reset
-#   boots the confirmed system.
+#   boots the confirmed system, and the admins hear when that skipped a
+#   deployed system.
 # - GRUB clears the trial flag on disk before it boots the trial, so a reset
 #   comes back to the confirmed system. On md RAID, where GRUB can't write
 #   through the array, it clears the copy on each member; if it can't clear
-#   them all, it boots the confirmed system instead (reboot-trial.cfg).
+#   them all, it boots the confirmed system instead (reboot-trial.cfg). That
+#   needs the members to hold the filesystem at their start: a plain
+#   partition, or md RAID1 with metadata 0.90 or 1.0. Elsewhere, such as /boot
+#   on md metadata 1.2, trials are off: GRUB boots the deployed system as it
+#   would without this module, nixhost_boot_trial_supported is 0 and the
+#   admins hear once.
 # - A trial that hangs is reset: by the hardware watchdog, which systemd
 #   arms in the initrd and in stage 2, if the kernel or systemd stop; by a
-#   deadline in the initrd and in stage 2 if the boot just doesn't finish,
-#   such as an initrd waiting for its root array. A panic reboots after 60 s,
+#   deadline in the initrd (until it switches root, after NixOS activation)
+#   and in stage 2 if the boot doesn't finish, such as an initrd waiting for
+#   its root array. A panic reboots after 60 s, soft and hard lockups panic,
 #   and an initrd failure panics instead of waiting at an emergency shell.
-# - After every boot nixhost-boot-check runs the deploy health check without
-#   its rollback. On a trial, a pass makes the system the confirmed one (and
-#   GRUB's default); a failure reboots into the confirmed system.
-# - The next boot records how a trial ended. A system whose trial failed
-#   isn't tried again until another one is deployed or an admin runs
-#   `nixhost-boot retry`; meanwhile reboot-detect holds its reboot
-#   (required.json's held, with /run/reboot-required down so kured doesn't
-#   reboot it over and over) and the admins hear about it.
+#   Without a watchdog trials still run, and the admins hear once.
+# - After every boot, once, nixhost-boot-check runs the deploy health check
+#   without its rollback; comin waits for it. On a trial, a pass makes the
+#   system the confirmed one (and GRUB's default); a failure reboots into the
+#   confirmed system.
+# - A live switch whose deploy health check passes becomes the confirmed
+#   system when a reboot wouldn't change anything boot-relevant (reboot-
+#   detect's components or fstab), so a crash doesn't boot old configuration.
+# - The next boot records how a trial ended. A system whose trial failed, or
+#   that a shutdown couldn't arm, isn't tried again until another one is
+#   deployed or an admin runs `nixhost-boot retry`; meanwhile reboot-detect
+#   holds its reboot (required.json's held: trial-reverted or
+#   trial-not-armed, with /run/reboot-required down so kured doesn't reboot
+#   it over and over) and the admins hear about it. A failed nixhost-boot
+#   holds it too.
 #
-# Reported as nixhost_boot_* metrics: nixhost_boot_reverts_total counts
-# trials that went back, nixhost_boot_trial is 1 while this boot is an
-# unconfirmed trial. /var/lib/nixhost-boot/trial.json has the last trial:
-# system, confirmed (its fallback) and outcome (pending, confirmed,
-# failed-check, deadline, hung, unconfirmed or not-tried).
+# Also:
+# - `grub-reboot` is ignored while trials are on: boot.cfg sets GRUB's
+#   default after NixOS's next_entry handling.
+# - A boot.cfg GRUB can't read whole fails open: GRUB boots its own entry 0,
+#   the deployed system, outside a trial (outcome bypassed).
+# - Revert and deadline reboots go through logind (so delay inhibitors run)
+#   but don't take kured's lock.
+#
+# This boot's state is /run/nixhost/boot/status.json (bootId, system,
+# confirmed, supported, trial: none, pending, confirmed or reverted, check:
+# pending, ok or failed) and nixhost_boot_status{boot_id,trial,check}.
+# nixhost_boot_reverts_total counts trials that failed their check, missed
+# the deadline or hung. /var/lib/nixhost-boot/trial.json has the last trial:
+# system, confirmed (its fallback), outcome and detail.
 #
 # Needs GRUB, the systemd initrd and the deploy module's health check.
 {
@@ -39,14 +62,26 @@
 let
   cfg = config.ethpandaops.reboot.trial;
   grub = config.boot.loader.grub;
+  sysctl = config.boot.kernel.sysctl;
+
+  # How long before the deadline a trial's boot check gives up on DNS and
+  # the git remote: room for its last round of checks.
+  outsideMargin = 120;
 
   settings = pkgs.writeText "nixhost-boot.json" (
     builtins.toJSON {
       grubDirs = map (b: "${b.path}/grub") grub.mirroredBoots;
       inherit (cfg) deadline;
+      inherit (config.ethpandaops.reboot.detect) components;
       # Added to the trial's kernel command line: reboot 60 s after a panic,
-      # and panic rather than wait at the initrd's emergency shell.
-      trialParams = "panic=60 boot.panic_on_fail";
+      # turn soft and hard lockups into panics, and panic rather than wait at
+      # the initrd's emergency shell.
+      trialParams = "panic=60 softlockup_panic=1 hardlockup_panic=1 boot.panic_on_fail";
+      # What the lockup panics go back to once a trial is confirmed.
+      panicSysctls = lib.mapAttrs (key: default: toString (sysctl."kernel.${key}" or default)) {
+        softlockup_panic = 0;
+        hardlockup_panic = 0;
+      };
     }
   );
 
@@ -54,13 +89,14 @@ let
     name = "nixhost-boot";
     runtimeInputs = with pkgs; [
       coreutils
+      diffutils
       gawk
       gnugrep
       gnused
       grub2 # grub-editenv
       jq
       systemd
-      util-linux # flock
+      util-linux # findmnt, flock
     ];
     text = ''
       SETTINGS=${settings}
@@ -71,6 +107,13 @@ let
     '';
   };
   command = subcommand: "${lib.getExe package} ${subcommand}";
+  oneshot = description: subcommand: {
+    inherit description;
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = command subcommand;
+    };
+  };
 in
 {
   imports = [
@@ -86,7 +129,9 @@ in
       description = ''
         Seconds after the kernel starts by which a trial boot must pass
         nixhost-boot-check, or it reboots into the confirmed system. It
-        covers the initrd too. Keep the health check's timeouts well under it.
+        covers the initrd too. On a trial, the check retries DNS and the git
+        remote until ${toString outsideMargin} s before it. Keep the health
+        check's timeouts well under it.
       '';
     };
     watchdogModules = lib.mkOption {
@@ -112,8 +157,8 @@ in
         message = "ethpandaops.reboot.trial needs GRUB with its default boot.loader.grub.default = 0.";
       }
       {
-        assertion = config.boot.initrd.systemd.enable;
-        message = "ethpandaops.reboot.trial needs the systemd initrd (boot.initrd.systemd.enable).";
+        assertion = config.boot.initrd.systemd.enable && config.boot.initrd.systemd.shell.enable;
+        message = "ethpandaops.reboot.trial needs the systemd initrd (boot.initrd.systemd.enable), with its shell for the boot deadline.";
       }
       {
         assertion = config.ethpandaops.deploy.healthCheck.enable or false;
@@ -137,12 +182,15 @@ in
     );
 
     # A trial still in the initrd at its deadline, say waiting for an array
-    # that never assembles, reboots. Leaving the initrd stops it, and an
-    # emergency shell doesn't.
+    # that never assembles or in a NixOS activation that hangs (which runs
+    # after initrd-switch-root.target), reboots. Isolating to the switch-root
+    # or emergency target leaves it running; switching root ends it, because
+    # systemd sends every remaining initrd process SIGTERM, which it takes as
+    # a clean exit. A Conflicts= on initrd-switch-root.service would stop it
+    # as soon as that service's start job is queued, before activation.
     boot.initrd.systemd.services.nixhost-initrd-deadline = {
       description = "Reboot a trial boot still in the initrd at its deadline";
       wantedBy = [ "initrd.target" ];
-      conflicts = [ "initrd-switch-root.target" ];
       unitConfig = {
         DefaultDependencies = false;
         ConditionKernelCommandLine = "nixhost.trial";
@@ -151,9 +199,13 @@ in
       serviceConfig = {
         Type = "oneshot";
         TimeoutStartSec = "infinity";
-        ExecStart = "/bin/sleep ${toString cfg.deadline}";
-        ExecStartPost = "/bin/systemctl reboot --force";
       };
+      script = ''
+        trap 'exit 0' TERM
+        sleep ${toString cfg.deadline} &
+        wait
+        systemctl reboot --force
+      '';
     };
 
     # Settles the last trial at boot, and arms the next one when it's stopped
@@ -162,6 +214,7 @@ in
       description = "Boot the confirmed system by default, and try a new one once";
       wantedBy = [ "multi-user.target" ];
       after = [ "local-fs.target" ];
+      onFailure = [ "nixhost-boot-failed.service" ];
       unitConfig.RequiresMountsFor = map (b: b.path) grub.mirroredBoots;
       # A switch must not stop it: only a shutdown runs ExecStop.
       restartIfChanged = false;
@@ -173,26 +226,35 @@ in
         TimeoutStopSec = 300;
       };
     };
+    systemd.services.nixhost-boot-failed = {
+      description = "Tell the admins nixhost-boot failed";
+      wants = [ "network-online.target" ];
+      after = [ "network-online.target" ];
+      serviceConfig.Type = "oneshot";
+      script = ''
+        ${lib.getExe config.ethpandaops.notify.package} --severity critical --title "nixhost-boot failed" admins \
+          "nixhost-boot.service failed, so no trial can be armed and reboots for a newly deployed system are held. See journalctl -u nixhost-boot."
+      '';
+    };
 
     systemd.services.nixhost-boot-check = {
       wantedBy = [ "multi-user.target" ];
       after = [ "nixhost-boot.service" ];
       onSuccess = [ "nixhost-boot-confirm.service" ];
       onFailure = [ "nixhost-boot-revert.service" ];
+      environment.NIXHOST_OUTSIDE_CHECKS_UNTIL = toString (cfg.deadline - outsideMargin);
     };
-    systemd.services.nixhost-boot-confirm = {
-      description = "Make a system that passed its boot check GRUB's default";
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = command "confirm";
-      };
-    };
-    systemd.services.nixhost-boot-revert = {
-      description = "Reboot a trial that failed its boot check into the confirmed system";
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = command "revert";
-      };
+    systemd.services.nixhost-boot-confirm = oneshot "Make a system that passed its boot check GRUB's default" "confirm";
+    systemd.services.nixhost-boot-revert = oneshot "Reboot a trial that failed its boot check into the confirmed system" "revert";
+
+    # A live switch that passes the deploy health check.
+    systemd.services.nixhost-health-check.onSuccess = [ "nixhost-boot-switched.service" ];
+    systemd.services.nixhost-boot-switched = oneshot "Confirm a switched system a reboot wouldn't change" "switched";
+
+    # No deploy during a trial, before its boot check has decided it.
+    systemd.services.comin = lib.mkIf (config.services.comin.enable or false) {
+      wantedBy = lib.mkForce [ "nixhost-boot-check.service" ];
+      after = [ "nixhost-boot-check.service" ];
     };
 
     systemd.timers.nixhost-boot-deadline = {
@@ -203,12 +265,6 @@ in
         AccuracySec = "1s";
       };
     };
-    systemd.services.nixhost-boot-deadline = {
-      description = "Reboot a trial that hasn't passed its boot check by the deadline";
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = command "deadline";
-      };
-    };
+    systemd.services.nixhost-boot-deadline = oneshot "Reboot a trial that hasn't passed its boot check by the deadline" "deadline";
   };
 }

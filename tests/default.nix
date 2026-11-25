@@ -26,15 +26,27 @@ let
       # Fail with a log well before CI's job timeout cancels the run.
       globalTimeout = 1200;
     };
-  diskoTest =
-    file: efi:
-    import file {
+  raid1Test =
+    efi:
+    import ./vm/raid1-disks.nix {
       inherit
         self
         pkgs
         nixpkgs
         disko
         efi
+        ;
+    };
+  trialTest =
+    efi: scenario:
+    import ./vm/reboot-trial.nix {
+      inherit
+        self
+        pkgs
+        nixpkgs
+        disko
+        efi
+        scenario
         ;
     };
 in
@@ -50,10 +62,13 @@ in
   logs = vmTest ./vm/logs.nix;
   vulnix = vmTest ./vm/vulnix.nix;
   kernel = vmTest ./vm/kernel.nix;
-  raid1-disks-bios = diskoTest ./vm/raid1-disks.nix false;
-  raid1-disks-uefi = diskoTest ./vm/raid1-disks.nix true;
-  reboot-trial-bios = diskoTest ./vm/reboot-trial.nix false;
-  reboot-trial-uefi = diskoTest ./vm/reboot-trial.nix true;
+  raid1-disks-bios = raid1Test false;
+  raid1-disks-uefi = raid1Test true;
+  reboot-trial-bios = trialTest false "core";
+  reboot-trial-uefi = trialTest true "core";
+  reboot-trial-hangs = trialTest false "hangs";
+  reboot-trial-boot-md12 = trialTest false "md12";
+  reboot-trial-boot-md10 = trialTest false "md10";
   comin-ssh = vmTest ./vm/comin-ssh.nix;
   banlist = vmTest ./vm/banlist.nix;
 

@@ -199,8 +199,8 @@ policy() {
   if [ -n "$(setting holdKernelSeriesChange)" ] && [ -z "$critical" ] && kernel_series_change; then
     supervised=1
   fi
-  # A system whose trial boot failed (ethpandaops.reboot.trial): the box went
-  # back to the confirmed system, and rebooting again wouldn't try it.
+  # Held by trial boots (ethpandaops.reboot.trial): rebooting again would
+  # only boot the confirmed system.
   held=$(jq -r '.held // empty' "$RUN/required.json")
   paused=0
   pause_end=0
@@ -251,8 +251,11 @@ policy() {
     what="$what, a new kernel series"
     planned=$at
   fi
+  case "$held" in
+  trial-reverted) what="$what, held: the new system failed its trial boot" ;;
+  trial-not-armed) what="$what, held: no trial boot of the new system could be set up" ;;
+  esac
   if [ -n "$held" ]; then
-    what="$what, held: the new system failed its trial boot"
     planned=$at
   fi
 
@@ -300,8 +303,10 @@ policy() {
     if [ "$scheduled" -gt 0 ]; then
       echo "*** REBOOTING at $(fmt "$scheduled"). Save your work."
     else
-      if [ -n "$held" ]; then
+      if [ "$held" = trial-reverted ]; then
         echo "*** The new system failed its trial boot and the box went back to the last confirmed one, so it doesn't reboot for it: an admin deploys a fix, or runs 'sudo nixhost-boot retry' to try it once more at the next reboot"
+      elif [ "$held" = trial-not-armed ]; then
+        echo "*** A trial boot of the new system couldn't be set up, so the box doesn't reboot for it: an admin fixes it (journalctl -u nixhost-boot) and runs 'sudo nixhost-boot retry'"
       elif [ "$supervised" = 1 ]; then
         echo "*** It doesn't reboot by itself: an admin reboots it (reboot-at or reboot-now) with someone on hand who can fix a boot that fails"
       fi
@@ -330,7 +335,7 @@ policy() {
   if [ "$scheduled" -gt 0 ]; then
     first="Rebooting at $(fmt "$scheduled") for a pending update. Save your work."
   elif [ -n "$held" ]; then
-    first="Update held: the new system failed its trial boot, and the admins have been told. Run reboot-status."
+    first="Update held: no trial boot of the new system is possible now, and the admins have been told. Run reboot-status."
   elif [ "$supervised" = 1 ] && [ "$planned" -gt 0 ]; then
     first="Reboot pending for a new kernel series: planned $(fmt "$planned") with reboot-at. Run reboot-status."
   elif [ "$supervised" = 1 ]; then
@@ -347,7 +352,7 @@ policy() {
   # One-time notices.
   if [ -n "$held" ]; then
     if remember notified-held "$since"; then
-      notify_users info "Update held" "${what}. The box went back to the last confirmed system and stays there until the admins deploy a fix."
+      notify_users info "Update held" "${what}. The box stays on the last confirmed system until the admins deal with it."
     fi
   elif remember notified-pending "$since"; then
     if [ "$supervised" = 1 ]; then

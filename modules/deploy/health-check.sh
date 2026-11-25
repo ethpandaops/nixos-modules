@@ -13,6 +13,12 @@
 # boot (nixhost-boot-check, after a boot): the same checks, but it never
 # switches systems. It exits 0 once they pass and 1 when they still fail at
 # the timeout; what follows is up to the unit's OnSuccess= and OnFailure=.
+# On a trial boot (nixhost.trial= on the kernel command line), DNS and the
+# git remote, which depend on things outside the box, keep being retried
+# until NIXHOST_OUTSIDE_CHECKS_UNTIL seconds of uptime, if that's later, so a
+# short outage doesn't revert a good trial.
+#
+# Timeouts count uptime, so a clock step during the checks doesn't end them.
 mode=${1:-deploy}
 status=manual
 sha=""
@@ -71,17 +77,27 @@ run_checks() {
   [ -z "$failures" ]
 }
 
+uptime_seconds() {
+  cut -d. -f1 /proc/uptime
+}
+
 # wait_healthy: retry the checks until they pass or the timeout runs out.
 # Cached answers from before an activation (resolved's DNS cache, and its
 # copy of /etc/hosts, reread at most every 2 s) could pass a system whose
 # DNS is broken, so flush them and let it settle first.
 wait_healthy() {
-  local start
+  local now local_until outside_until
   resolvectl flush-caches 2>/dev/null || true
   sleep 3
-  start=$(date +%s)
+  local_until=$(($(uptime_seconds) + $(setting .healthCheck.timeout)))
+  outside_until=$local_until
+  if [ "$mode" = boot ] && [[ " $(</proc/cmdline) " == *" nixhost.trial="* ]] &&
+    [ "${NIXHOST_OUTSIDE_CHECKS_UNTIL:-0}" -gt "$outside_until" ]; then
+    outside_until=$NIXHOST_OUTSIDE_CHECKS_UNTIL
+  fi
   until run_checks; do
-    if [ $(($(date +%s) - start)) -ge "$(setting .healthCheck.timeout)" ]; then
+    now=$(uptime_seconds)
+    if { [ -n "$local_failures" ] && [ "$now" -ge "$local_until" ]; } || [ "$now" -ge "$outside_until" ]; then
       return 1
     fi
     echo "checks failing:$failures; retrying"

@@ -44,13 +44,20 @@ for component in "${COMPONENTS[@]}"; do
   fi
 done
 
-# A system whose trial boot failed isn't tried again (reboot-trial.nix):
-# keep the reboot pending, but hold it.
+# With trial boots (reboot-trial.nix), a reboot that would only boot the
+# confirmed system again is held, still pending: a system whose trial failed
+# isn't tried again (trial-reverted), nor one a shutdown couldn't arm a
+# trial for, or can't while nixhost-boot has failed (trial-not-armed).
 held=""
-if [ "${#changed[@]}" -gt 0 ] && [ -n "$TRIAL_FILE" ] && [ -r "$TRIAL_FILE" ] &&
-  [ "$(jq -r .system "$TRIAL_FILE")" = "$(readlink -f "$target")" ] &&
-  ! jq -e '.outcome == "pending" or .outcome == "confirmed"' "$TRIAL_FILE" >/dev/null; then
-  held=trial-reverted
+if [ "${#changed[@]}" -gt 0 ] && [ -n "$TRIAL_FILE" ]; then
+  if systemctl is-failed -q nixhost-boot.service; then
+    held=trial-not-armed
+  elif [ -r "$TRIAL_FILE" ] && [ "$(jq -r .system "$TRIAL_FILE")" = "$(readlink -f "$target")" ]; then
+    case "$(jq -r .outcome "$TRIAL_FILE")" in
+    not-armed) held=trial-not-armed ;;
+    failed-check | deadline | hung | unconfirmed) held=trial-reverted ;;
+    esac
+  fi
 fi
 
 if [ "${#changed[@]}" -gt 0 ]; then
@@ -100,7 +107,7 @@ fi
     done
   fi
   if [ -n "$held" ]; then
-    echo "# HELP nixhost_reboot_pending_held Why the pending reboot is held: trial-reverted, the deployed system's trial boot failed."
+    echo "# HELP nixhost_reboot_pending_held Why the pending reboot is held: trial-reverted, the deployed system's trial boot failed; trial-not-armed, no trial of it could be armed."
     echo "# TYPE nixhost_reboot_pending_held gauge"
     echo "nixhost_reboot_pending_held{reason=\"$held\"} 1"
   fi
