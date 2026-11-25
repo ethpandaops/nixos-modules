@@ -38,7 +38,7 @@ is [tests/server.nix](tests/server.nix).
 
 | Module | What it does |
 | --- | --- |
-| `default` | `base`, `users`, `secrets`, `deploy`, `reboot-detect` and `monitoring`: what every server gets |
+| `default` | `base`, `users`, `secrets`, `deploy`, `reboot-detect`, `monitoring` and `banlist` (off until a host sets its mode): what every server gets |
 | `base` | srvos's server profile plus key-only SSH for group `ssh-users`, passwordless sudo for `wheel`, Nix GC, persistent journal, kernel and network hardening, and the module lock (`ethpandaops.kernelModules`: collect what loads after boot, then lock) |
 | `users` | `ethpandaops.users.<name>`: fixed UID, SSH keys, sudo, expiry, notify targets |
 | `secrets` | sops-nix with the host's SSH ed25519 key as its age identity |
@@ -46,6 +46,7 @@ is [tests/server.nix](tests/server.nix).
 | `reboot-detect` | reports when the deployed system needs a reboot (kernel, initrd, modules, kernel parameters, systemd, or a system set to boot that isn't running yet), as `/run/reboot-required` for tools such as kured |
 | `reboot-interactive` | reboots in a nightly window when nobody is logged in, or at a deadline, with notices and `reboot-status`, `reboot-hold`, `reboot-at`, `reboot-now`; a new kernel series waits for an admin |
 | `monitoring` | node-exporter and comin's exporter on the tailnet only; drift, SSH-login, kernel-protection and BPF metrics; optional journal shipping over OTLP (`monitoring.logs`) and a daily vulnix scan (`monitoring.vulnix`); host labels (`ethpandaops.host`) |
+| `banlist` | `ethpandaops.banlist`: pulls a signed fleet ban list every 30 s (by default from the log shipping endpoint) and drops new connections from its sources, or only counts them in shadow mode; the fleet's own `allowFile` always wins, and a list that's too wide, too large, stale, replayed or badly signed is refused |
 | `static-network` | a static, MAC-matched uplink with systemd-networkd |
 | `raid1-disks` | disko layout: mdadm RAID1 for the ESP and root on every listed disk, GRUB on each |
 
