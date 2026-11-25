@@ -33,17 +33,43 @@ build_hosts() {
 #   only commits signed by an allowed key, which neither this bot's commit
 #   nor GitHub's merge button has.
 land() {
-  local mode=$1 branch=$2 message=$3 pr_branch=${4:-} number body
+  local mode=$1 branch=$2 message=$3 pr_branch=${4:-}
   case "$mode" in
   push)
     git push origin "HEAD:refs/heads/$branch"
     gh workflow run check.yaml --ref "$branch"
     ;;
   pr)
-    git push --force origin "HEAD:refs/heads/$pr_branch"
-    body=$(mktemp)
-    {
-      tail -n +3 "$message"
+    propose pr "$branch" "$message" "$pr_branch"
+    ;;
+  *)
+    echo "unknown mode $mode" >&2
+    exit 2
+    ;;
+  esac
+}
+
+# propose <mode> <branch> <message file> <pr branch>: push the commit at HEAD
+# to the pr branch, open or update its pull request against the branch (the
+# message's subject as title, the rest as body) and start its check. For the
+# jobs that only ever propose (kernel-series, nixos-release, cve-scan's
+# whitelist), mode is the repo's: push means the merge button lands it, pr
+# adds how to land it as your own signed commit. Either way the commit
+# message, trailers included, is what lands.
+propose() {
+  local mode=$1 branch=$2 message=$3 pr_branch=$4 number body
+  case "$mode" in
+  push | pr) ;;
+  *)
+    echo "unknown mode $mode" >&2
+    exit 2
+    ;;
+  esac
+  git push --force origin "HEAD:refs/heads/$pr_branch"
+  body=$(mktemp)
+  {
+    tail -n +3 "$message"
+    if [ "$mode" = pr ]; then
       echo
       echo "---"
       echo "Land this as your own signed commit, not with the merge button: nodes that"
@@ -54,20 +80,28 @@ land() {
       echo "    git push origin $branch"
       echo
       echo "Then close this pull request; the next run opens a new one when there's more."
-    } >"$body"
-    number=$(gh pr list --head "$pr_branch" --base "$branch" --state open --json number --jq '.[0].number // empty')
-    if [ -n "$number" ]; then
-      gh pr edit "$number" --title "$(head -n1 "$message")" --body-file "$body"
-    else
-      gh pr create --base "$branch" --head "$pr_branch" --title "$(head -n1 "$message")" --body-file "$body"
     fi
-    gh workflow run check.yaml --ref "$pr_branch"
-    ;;
-  *)
-    echo "unknown mode $mode" >&2
-    exit 2
-    ;;
-  esac
+  } >"$body"
+  number=$(open_pr "$pr_branch" "$branch")
+  if [ -n "$number" ]; then
+    gh pr edit "$number" --title "$(head -n1 "$message")" --body-file "$body"
+  else
+    gh pr create --base "$branch" --head "$pr_branch" --title "$(head -n1 "$message")" --body-file "$body"
+  fi
+  gh workflow run check.yaml --ref "$pr_branch"
+}
+
+# open_pr <pr branch> <branch>: the number of the open pull request from the
+# pr branch into the branch, or nothing.
+open_pr() {
+  gh pr list --head "$1" --base "$2" --state open --json number --jq '.[0].number // empty'
+}
+
+# close_pr <pr branch> <branch> <comment>: close that pull request, if open.
+close_pr() {
+  local number
+  number=$(open_pr "$1" "$2")
+  [ -z "$number" ] || gh pr close "$number" --comment "$3"
 }
 
 # commit_as_bot <message file> [paths...]: commit as github-actions[bot].

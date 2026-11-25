@@ -65,6 +65,9 @@ A host repo's workflows call the reusable ones here, pinned by commit:
 | `host-update-nixpkgs.yaml` | moves nixpkgs to the newest channel release at least a day old |
 | `host-refresh-keys.yaml` | refreshes `keys/<login>.keys` from GitHub for the people already listed, with a webhook notice |
 | `host-bump-modules.yaml` | moves `nixos-modules` to the newest master commit whose check passed and that is old enough |
+| `host-cve-scan.yaml` | scans the hosts' systems with vulnix; takes a channel release at once when it fixes a critical CVE, and opens a pull request whitelisting the critical CVEs that have evidence they don't apply, for a person to check |
+| `host-kernel-series.yaml` | opens a pull request moving the pinned kernel series once a newer one is at x.y.4 and has been in the channel 3 weeks; with `auto-merge`, lands it once its check passed |
+| `host-nixos-release.yaml` | opens a pull request moving to the next NixOS release a month after it's out, for a person to merge after reading the release notes |
 
 ```yaml
 jobs:
@@ -101,7 +104,20 @@ whose nodes deploy only commits signed by an allowed key: neither the bot's
 commit nor GitHub's merge button carries one, so a person lands it as their
 own signed commit (the pull request says how). host-deploy only
 fast-forwards a branch to a commit that's already there, so it works either
-way.
+way. The jobs that only propose (cve-scan's whitelist, kernel-series,
+nixos-release) open a pull request in either mode; with `pr` it says how to
+land it signed, and kernel-series' `auto-merge` needs `push`. They need
+"Allow GitHub Actions to create and approve pull requests" in the repo's
+Actions settings.
+
+Every job lands on the branch through check; none writes the branch comin
+pulls, so a fleet's staged rollout takes their commits like any other. The
+update jobs' commits carry trailers a rollout reads: `Update: nixpkgs`,
+`kernel-series`, `nixos-release` or `vulnix-whitelist`, and on cve-scan's
+fast path `Urgency: security` with a `Fixes: CVE-…` per CVE. Urgency may
+shorten a rollout's waits but never skips its canaries or gates. Land a pull
+request with its message intact (`git cherry-pick -S` keeps it; a squash or
+reword loses the trailers).
 
 ## Change
 

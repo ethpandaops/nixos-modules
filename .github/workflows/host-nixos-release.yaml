@@ -1,0 +1,46 @@
+# Reusable: about a month after the next NixOS release is out, open a pull
+# request on the nixos-release branch moving flake.nix's inputs to it
+# (nixos-26.05 to nixos-26.11, say), whose check shows whether every host
+# builds (ci/nixos-release.sh at the nixos-modules commit the caller's
+# flake.lock pins). A person reads the release notes and merges it; it never
+# merges itself.
+#
+# The caller grants contents: write, actions: write and pull-requests: write,
+# and the repository allows GitHub Actions to create pull requests.
+#
+#   on:
+#     schedule: [{ cron: "29 6 * * 1" }]
+#     workflow_dispatch:
+#   jobs:
+#     release:
+#       permissions: { contents: write, actions: write, pull-requests: write }
+#       uses: ethpandaops/nixos-modules/.github/workflows/host-nixos-release.yaml@<commit>
+name: host-nixos-release
+on:
+  workflow_call:
+    inputs:
+      branch:
+        type: string
+        default: master
+      mode:
+        description: "push: the merge button lands it; pr: a person lands it as their own signed commit (for nodes that deploy only signed commits)"
+        type: string
+        default: push
+jobs:
+  release:
+    if: github.ref_name == inputs.branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+      - name: Propose the next NixOS release
+        env:
+          BRANCH: ${{ inputs.branch }}
+          MODE: ${{ inputs.mode }}
+        run: nix run --inputs-from . nixos-modules#nixos-release -- --branch "$BRANCH" --mode "$MODE"

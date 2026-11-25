@@ -1,0 +1,8 @@
+commit 4ebd33dd77eabe8d4c45232bed4b42a31d2f9edc
+
+    stdio-common: Fix buffer overflow in scanf %mc [BZ #34008]
+    
+    * stdio-common/vfscanf-internal.c: When enlarging allocated buffer with
+    format %mc or %mC, glibc allocates one byte less, leading to
+    user-controlled one byte overflow. This commit fixes BZ #34008, or
+    CVE-2026-5450.
