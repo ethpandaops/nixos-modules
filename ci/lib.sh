@@ -24,7 +24,9 @@ build_hosts() {
 
 # land <mode> <branch> <message file> [pr branch]: get the commit at HEAD to
 # the branch and start its check run. Pushes made with GITHUB_TOKEN start no
-# workflow, so check is started by dispatch.
+# workflow, so check is started by dispatch. That run's completion fires no
+# workflow_run either, so the caller's check.yaml deploys a dispatched run on
+# master itself (host-check.yaml's header).
 # - push pushes it to the branch: for a repo whose nodes deploy any commit.
 # - pr pushes it to the pr branch and opens or updates a pull request that a
 #   person lands as their own signed commit: for a repo whose nodes deploy
