@@ -1,0 +1,66 @@
+# Reusable: once a kernel series newer than the pinned one is at x.y.4 or
+# later in the locked nixpkgs and was in the channel 3 weeks ago, open a pull
+# request on the kernel-series branch moving the pin
+# (boot.kernelPackages = pkgs.linuxPackages_X_Y), whose check builds every
+# host (ci/kernel-series.sh at the nixos-modules commit the caller's
+# flake.lock pins).
+#
+# auto-merge (mode push only) lands it on a later run once its check passed,
+# and the reboot policy reboots in its window. Leave it off until
+# self-reverting reboots have come through a real kernel-patch reboot on the
+# repo's hosts; turn it on in the same change that sets
+# ethpandaops.reboot.holdKernelSeriesChange = false. Until then a person
+# merges and reboots.
+#
+# The caller grants contents: write, actions: write and pull-requests: write,
+# and the repository allows GitHub Actions to create pull requests.
+#
+#   on:
+#     schedule: [{ cron: "53 5 * * *" }]
+#     workflow_dispatch:
+#   jobs:
+#     kernel:
+#       permissions: { contents: write, actions: write, pull-requests: write }
+#       uses: ethpandaops/nixos-modules/.github/workflows/host-kernel-series.yaml@<commit>
+#       with: { build: myhost }
+name: host-kernel-series
+on:
+  workflow_call:
+    inputs:
+      build:
+        description: Hosts whose systems to build, space-separated; the first one's kernel is the pinned series
+        type: string
+        required: true
+      auto-merge:
+        description: Land the pull request once its check passed (mode push only)
+        type: boolean
+        default: false
+      branch:
+        type: string
+        default: master
+      mode:
+        description: "push: the merge button lands it; pr: a person lands it as their own signed commit (for nodes that deploy only signed commits)"
+        type: string
+        default: push
+jobs:
+  kernel:
+    if: github.ref_name == inputs.branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+      - name: Move the kernel series
+        env:
+          BUILD: ${{ inputs.build }}
+          AUTO_MERGE: ${{ inputs.auto-merge }}
+          BRANCH: ${{ inputs.branch }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          nix run --inputs-from . nixos-modules#kernel-series -- \
+            --build "$BUILD" --auto-merge "$AUTO_MERGE" --branch "$BRANCH" --mode "$MODE"
