@@ -53,6 +53,7 @@ in
   raid1-disks-bios = raid1Test false;
   raid1-disks-uefi = raid1Test true;
   comin-ssh = vmTest ./vm/comin-ssh.nix;
+  banlist = vmTest ./vm/banlist.nix;
 
   # raid1-disks refuses a kernel that can't assemble arrays made by a newer one.
   raid1-rejects-old-kernel =

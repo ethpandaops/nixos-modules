@@ -77,6 +77,7 @@
           ./modules/updates/reboot-interactive.nix
         ];
         monitoring = module "monitoring" [ ./modules/monitoring ];
+        banlist = module "banlist" [ ./modules/banlist ];
         static-network = module "static-network" [ ./modules/static-network.nix ];
         raid1-disks = module "raid1-disks" [
           disko.nixosModules.disko
@@ -92,6 +93,7 @@
           self.nixosModules.deploy
           self.nixosModules.reboot-detect
           self.nixosModules.monitoring
+          self.nixosModules.banlist
         ];
       };
 
