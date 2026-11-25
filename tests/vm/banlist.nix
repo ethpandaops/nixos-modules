@@ -34,7 +34,7 @@ let
     ).serve_forever()
   '';
 
-  banlist = nodes: mode: {
+  banlist = mode: {
     imports = [
       self.nixosModules.base
       self.nixosModules.banlist
@@ -47,12 +47,6 @@ let
       publicKeys = [ keys.snakeOilEd25519PublicKey ];
       # The default allows private ranges, the test network's among them.
       allow = [ "127.0.0.0/8" ];
-      # The list's server, as a fleet lists its own addresses.
-      allowFile = pkgs.writeText "banlist-allow" ''
-        # the client
-        ${nodes.client.networking.primaryIPAddress}
-        ${nodes.client.networking.primaryIPv6Address}/128
-      '';
       interval = 2;
     };
     system.switch.enable = true;
@@ -64,7 +58,13 @@ in
   nodes.server =
     { nodes, lib, ... }:
     {
-      imports = [ (banlist nodes "shadow") ];
+      imports = [ (banlist "shadow") ];
+      # The list's server: allowed here, whatever the list says.
+      ethpandaops.banlist.allowFile = pkgs.writeText "banlist-allow" ''
+        # the client
+        ${nodes.client.networking.primaryIPAddress}
+        ${nodes.client.networking.primaryIPv6Address}/128
+      '';
       specialisation.enforce.configuration.ethpandaops.banlist.mode = lib.mkForce "enforce";
       specialisation.off.configuration.ethpandaops.banlist.mode = lib.mkForce "off";
       # What the scanner tries to reach.
@@ -81,7 +81,7 @@ in
   nodes.locked =
     { nodes, lib, ... }:
     {
-      imports = [ (banlist nodes "off") ];
+      imports = [ (banlist "off") ];
       ethpandaops.kernelModules = {
         lock = true;
         allowlist = [

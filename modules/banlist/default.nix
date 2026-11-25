@@ -29,8 +29,10 @@
 #   mode shadow, fills the shadow sets; a list in mode "empty" empties both.
 #
 # Nothing here names a host, address or range of ours: the list's URL and
-# credentials default to the host's log shipping ones (monitoring.logs), and
-# each fleet keeps its own addresses in its allowFile, in its own repo.
+# credentials default to the host's log shipping ones (monitoring.logs). Our
+# own addresses belong in the publisher's allow list, so they never reach
+# the list; hosts only always allow the generic ranges in `allow`, and
+# whatever an optional allowFile adds.
 #
 # Break-glass on one box: `systemctl stop nixhost-banlist-sets.service`
 # takes the chain out at once (and stops the puller); drift reports the
@@ -126,7 +128,7 @@ in
       ];
       default = "off";
       description = ''
-        off: nothing (the default: a fleet turns it on with its allowFile).
+        off: nothing (the default).
         shadow: load the list and count what it matches, but drop nothing.
         enforce: drop new connections from the list's sources, unless the
         list itself is in shadow mode. With security.lockKernelModules,
@@ -178,17 +180,16 @@ in
         "fc00::/7"
         "fe80::/10"
       ];
-      description = "Sources the list never blocks, besides allowFile's.";
+      description = "Sources the list never blocks, whatever it says, besides allowFile's.";
     };
     allowFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
       example = lib.literalExpression "./banlist-allow.txt";
       description = ''
-        The fleet's own allow list, in its own repo: an address or CIDR per
-        line, # comments. Our servers' and other fleets' addresses, the
-        admins', monitoring's. These always win over the list. Required to
-        turn the list on; it may be empty.
+        Optional: more sources the list never blocks, from a file in the
+        host's own repo, an address or CIDR per line, # comments. They win
+        over the list even if the publisher's own allow list misses them.
       '';
     };
     interval = lib.mkOption {
@@ -207,10 +208,6 @@ in
       {
         assertion = cfg.publicKeys != [ ];
         message = "ethpandaops.banlist.publicKeys is empty: no list could be verified.";
-      }
-      {
-        assertion = cfg.allowFile != null;
-        message = "ethpandaops.banlist.allowFile must name the fleet's allow list (it may be empty).";
       }
       {
         assertion = invalid == [ ];
