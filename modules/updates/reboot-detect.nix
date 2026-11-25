@@ -14,6 +14,11 @@
 # whatever changed (component boot-default). A `test` deploy from the testing
 # branch can make it report a reboot that would not change anything; that
 # clears on the reboot.
+#
+# With ethpandaops.reboot.trial, a deployed system whose trial boot failed
+# holds its reboot: required.json says so (held: trial-reverted) and so does
+# nixhost_reboot_pending_held, but the sentinels stay down, so kured doesn't
+# reboot the box into the confirmed system over and over.
 {
   config,
   lib,
@@ -33,6 +38,7 @@ let
     ];
     text = ''
       COMPONENTS=(${lib.escapeShellArgs cfg.components})
+      TRIAL_FILE=${lib.optionalString config.ethpandaops.reboot.trial.enable "/var/lib/nixhost-boot/trial.json"}
       ${config.ethpandaops.lib.shell}
       ${config.ethpandaops.lib.bootDefault}
       ${builtins.readFile ./reboot-detect.sh}
@@ -40,7 +46,10 @@ let
   };
 in
 {
-  imports = [ ../metrics.nix ];
+  imports = [
+    ../metrics.nix
+    ./reboot-trial.nix
+  ];
 
   options.ethpandaops.reboot.detect.components = lib.mkOption {
     type = lib.types.listOf lib.types.str;

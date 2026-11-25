@@ -1,4 +1,6 @@
-# After a deployment: check sshd, routing, the firewall, DNS and the git
+# nixhost-health-check [deploy|boot]
+#
+# deploy (comin's hook): check sshd, routing, the firewall, DNS and the git
 # remote, retrying for healthCheck.timeout seconds. If they still fail, try
 # the last system that passed. Keep it only if the checks pass there and the
 # deploy is the cause; if they fail there too, the deploy isn't the cause, so
@@ -7,10 +9,15 @@
 # DNS and the git remote also depend on things outside the box. When only
 # they failed, a pass on the older system may just mean an outage ended, so
 # the deployed system gets a second try before the rollback is kept.
+#
+# boot (nixhost-boot-check, after a boot): the same checks, but it never
+# switches systems. It exits 0 once they pass and 1 when they still fail at
+# the timeout; what follows is up to the unit's OnSuccess= and OnFailure=.
+mode=${1:-deploy}
 status=manual
 sha=""
 error=""
-if [ -r "$RUN_DIR/deployment.json" ]; then
+if [ "$mode" = deploy ] && [ -r "$RUN_DIR/deployment.json" ]; then
   status=$(jq -r .status "$RUN_DIR/deployment.json")
   sha=$(jq -r .sha "$RUN_DIR/deployment.json")
   error=$(jq -r .error "$RUN_DIR/deployment.json")
@@ -122,6 +129,8 @@ if [ -z "$failures" ]; then
   else
     record_good "$current"
   fi
+elif [ "$mode" = boot ]; then
+  echo "checks failed after boot:$failures"
 else
   echo "checks failed:$failures"
   last_good=$(readlink "$STATE_DIR/last-good" || readlink -f /run/booted-system)
@@ -161,7 +170,7 @@ fi
 echo "$last_success" >"$STATE_DIR/last_success"
 
 write_metrics nixhost_healthcheck <<METRICS
-# HELP nixhost_healthcheck_ok Whether the box passed its last post-deploy health check.
+# HELP nixhost_healthcheck_ok Whether the box passed its last health check, after a deploy or a boot.
 # TYPE nixhost_healthcheck_ok gauge
 nixhost_healthcheck_ok $ok
 # HELP nixhost_healthcheck_last_run_timestamp_seconds When the health check last ran.

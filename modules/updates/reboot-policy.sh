@@ -170,7 +170,7 @@ clear_pending_state() {
 policy() {
   mkdir -p "$RUN" "$STATE"
   local now since deadline paused pause_end hold hold_by at at_by earliest planned scheduled
-  local what first critical supervised sessions inhibitors reason
+  local what first critical supervised held sessions inhibitors reason
   now=$(date +%s)
 
   # Back from a reboot this policy started: say so once.
@@ -199,6 +199,9 @@ policy() {
   if [ -n "$(setting holdKernelSeriesChange)" ] && [ -z "$critical" ] && kernel_series_change; then
     supervised=1
   fi
+  # A system whose trial boot failed (ethpandaops.reboot.trial): the box went
+  # back to the confirmed system, and rebooting again wouldn't try it.
+  held=$(jq -r '.held // empty' "$RUN/required.json")
   paused=0
   pause_end=0
   if [ -n "$(setting pauseUntil)" ]; then
@@ -248,6 +251,10 @@ policy() {
     what="$what, a new kernel series"
     planned=$at
   fi
+  if [ -n "$held" ]; then
+    what="$what, held: the new system failed its trial boot"
+    planned=$at
+  fi
 
   scheduled=$(scheduled_reboot)
   sessions=$(open_sessions | sort -u | paste -sd, -)
@@ -255,7 +262,7 @@ policy() {
 
   if [ "$scheduled" -eq 0 ]; then
     reason=""
-    if [ "$paused" = 0 ] && [ "$supervised" = 0 ] && [ "$now" -ge "$deadline" ]; then
+    if [ "$paused" = 0 ] && [ "$supervised" = 0 ] && [ -z "$held" ] && [ "$now" -ge "$deadline" ]; then
       echo "deadline $(fmt "$deadline") reached; rebooting in $(setting deadlineWarningMinutes) minutes"
       record_reboot "deadline reached"
       scheduled=$((now + $(setting deadlineWarningMinutes) * 60))
@@ -268,7 +275,7 @@ policy() {
         "Deadline reached: rebooting at $(fmt "$scheduled") to finish an update. ${what}." || true
     elif [ "$at" -gt 0 ] && [ "$now" -ge "$at" ]; then
       reason="the time $at_by chose with reboot-at"
-    elif [ "$paused" = 0 ] && [ "$supervised" = 0 ] && [ "$now" -ge "$((since + $(setting minDelay)))" ] &&
+    elif [ "$paused" = 0 ] && [ "$supervised" = 0 ] && [ -z "$held" ] && [ "$now" -ge "$((since + $(setting minDelay)))" ] &&
       [ "$now" -ge "$hold" ] && in_window "$now" && [ -z "$sessions" ] && [ -z "$inhibitors" ]; then
       reason="nightly window, nobody logged in"
     else
@@ -293,7 +300,9 @@ policy() {
     if [ "$scheduled" -gt 0 ]; then
       echo "*** REBOOTING at $(fmt "$scheduled"). Save your work."
     else
-      if [ "$supervised" = 1 ]; then
+      if [ -n "$held" ]; then
+        echo "*** The new system failed its trial boot and the box went back to the last confirmed one, so it doesn't reboot for it: an admin deploys a fix, or runs 'sudo nixhost-boot retry' to try it once more at the next reboot"
+      elif [ "$supervised" = 1 ]; then
         echo "*** It doesn't reboot by itself: an admin reboots it (reboot-at or reboot-now) with someone on hand who can fix a boot that fails"
       fi
       if [ "$paused" = 1 ]; then
@@ -304,12 +313,12 @@ policy() {
       fi
       if [ "$at" -gt 0 ] && [ "$planned" = "$at" ]; then
         echo "*** Planned reboot: $(fmt "$planned"), as $at_by asked with reboot-at"
-      elif [ "$supervised" = 0 ] && [ "$planned" -lt "$deadline" ]; then
+      elif [ "$supervised" = 0 ] && [ -z "$held" ] && [ "$planned" -lt "$deadline" ]; then
         echo "*** Planned reboot: $(fmt "$planned"), only if nobody is logged in and no hold is set"
       fi
-      if [ "$supervised" = 1 ]; then
+      if [ -z "$held" ] && [ "$supervised" = 1 ]; then
         echo "*** Admins' deadline: $(fmt "$deadline")"
-      else
+      elif [ -z "$held" ]; then
         echo "*** Hard deadline:  $(fmt "$deadline") (reboots then even if you're busy)"
       fi
     fi
@@ -320,6 +329,8 @@ policy() {
   chmod 0644 "$RUN/motd"
   if [ "$scheduled" -gt 0 ]; then
     first="Rebooting at $(fmt "$scheduled") for a pending update. Save your work."
+  elif [ -n "$held" ]; then
+    first="Update held: the new system failed its trial boot, and the admins have been told. Run reboot-status."
   elif [ "$supervised" = 1 ] && [ "$planned" -gt 0 ]; then
     first="Reboot pending for a new kernel series: planned $(fmt "$planned") with reboot-at. Run reboot-status."
   elif [ "$supervised" = 1 ]; then
@@ -330,22 +341,26 @@ policy() {
   echo "$first" >"$RUN/status-line"
   jq -n --argjson since "$since" --argjson deadline "$deadline" --argjson planned "$planned" \
     --argjson hold "$hold" --argjson at "$at" --argjson paused "$paused" --argjson scheduled "$scheduled" \
-    --argjson supervised "$supervised" \
-    '{$since, $deadline, $planned, $hold, $at, $paused, $scheduled, $supervised}' >"$RUN/policy.json"
+    --argjson supervised "$supervised" --arg held "$held" \
+    '{$since, $deadline, $planned, $hold, $at, $paused, $scheduled, $supervised, $held}' >"$RUN/policy.json"
 
   # One-time notices.
-  if remember notified-pending "$since"; then
+  if [ -n "$held" ]; then
+    if remember notified-held "$since"; then
+      notify_users info "Update held" "${what}. The box went back to the last confirmed system and stays there until the admins deploy a fix."
+    fi
+  elif remember notified-pending "$since"; then
     if [ "$supervised" = 1 ]; then
       notify_users info "Reboot pending: new kernel series" "A reboot is pending. ${what}, so it doesn't happen by itself: an admin will schedule it, and reboot-status on the box shows when."
     else
       notify_users info "Reboot pending" "A reboot is pending. ${what}. Planned: $(fmt "$planned"); deadline: $(fmt "$deadline"). Use reboot-hold or reboot-at on the box to choose another time."
     fi
   fi
-  if [ "$supervised" = 1 ] && remember notified-supervised "$(jq -r .kernel.new "$RUN/required.json")"; then
+  if [ "$supervised" = 1 ] && [ -z "$held" ] && remember notified-supervised "$(jq -r .kernel.new "$RUN/required.json")"; then
     "$NOTIFY" --severity warning --title "Supervised reboot needed" admins \
       "${what}: it needs a supervised reboot. Run reboot-at or reboot-now on the box while someone with console access is on hand, by $(fmt "$deadline")." || true
   fi
-  if [ "$paused" = 0 ] && [ "$supervised" = 0 ] && [ "$scheduled" -eq 0 ]; then
+  if [ "$paused" = 0 ] && [ "$supervised" = 0 ] && [ -z "$held" ] && [ "$scheduled" -eq 0 ]; then
     if [ "$((deadline - now))" -le 3600 ] && remember notified-1h "$deadline"; then
       wall "This box reboots within an hour ($(fmt "$deadline")) to finish an update. Run reboot-status for details."
       notify_users warning "Reboot within an hour" "The box reboots within an hour, at $(fmt "$deadline"), to finish an update."

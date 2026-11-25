@@ -44,6 +44,15 @@ for component in "${COMPONENTS[@]}"; do
   fi
 done
 
+# A system whose trial boot failed isn't tried again (reboot-trial.nix):
+# keep the reboot pending, but hold it.
+held=""
+if [ "${#changed[@]}" -gt 0 ] && [ -n "$TRIAL_FILE" ] && [ -r "$TRIAL_FILE" ] &&
+  [ "$(jq -r .system "$TRIAL_FILE")" = "$(readlink -f "$target")" ] &&
+  ! jq -e '.outcome == "pending" or .outcome == "confirmed"' "$TRIAL_FILE" >/dev/null; then
+  held=trial-reverted
+fi
+
 if [ "${#changed[@]}" -gt 0 ]; then
   since=$now
   if [ -r "$RUN/required.json" ] && [ "$(jq -r .required "$RUN/required.json")" = true ]; then
@@ -55,14 +64,21 @@ if [ "${#changed[@]}" -gt 0 ]; then
     --arg new_kernel "$(kernel_version "$target")" \
     --arg booted_systemd "$(store_name /run/booted-system/systemd)" \
     --arg new_systemd "$(store_name "$target/systemd")" \
+    --arg held "$held" \
     '{required: true, $since, components: $ARGS.positional,
       kernel: {booted: $booted_kernel, new: $new_kernel},
-      systemd: {booted: $booted_systemd, new: $new_systemd}}' \
+      systemd: {booted: $booted_systemd, new: $new_systemd},
+      held: (if $held == "" then null else $held end)}' \
     --args "${changed[@]}" >"$RUN/required.json.tmp"
   mv -f "$RUN/required.json.tmp" "$RUN/required.json"
-  printf '%s\n' "${changed[@]}" >/run/reboot-required.components
-  touch /run/reboot-required "$RUN/reboot-required"
-  echo "reboot needed for: ${changed[*]} (since $(date -u -d "@$since"))"
+  if [ -z "$held" ]; then
+    printf '%s\n' "${changed[@]}" >/run/reboot-required.components
+    touch /run/reboot-required "$RUN/reboot-required"
+    echo "reboot needed for: ${changed[*]} (since $(date -u -d "@$since"))"
+  else
+    rm -f /run/reboot-required /run/reboot-required.components "$RUN/reboot-required"
+    echo "reboot needed for: ${changed[*]} (since $(date -u -d "@$since")), held: $held"
+  fi
 else
   echo '{"required": false}' >"$RUN/required.json"
   rm -f /run/reboot-required /run/reboot-required.components "$RUN/reboot-required"
@@ -82,5 +98,10 @@ fi
     for component in "${changed[@]}"; do
       echo "nixhost_reboot_pending_component{component=\"$component\"} 1"
     done
+  fi
+  if [ -n "$held" ]; then
+    echo "# HELP nixhost_reboot_pending_held Why the pending reboot is held: trial-reverted, the deployed system's trial boot failed."
+    echo "# TYPE nixhost_reboot_pending_held gauge"
+    echo "nixhost_reboot_pending_held{reason=\"$held\"} 1"
   fi
 } | write_metrics nixhost_reboot_detect

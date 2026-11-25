@@ -244,6 +244,28 @@ in
       };
     };
 
+    # The same checks after a boot, without the rollback: it exits 0 once they
+    # pass and fails when they still fail at the timeout. Nothing starts it
+    # here; ethpandaops.reboot.trial runs it after every boot and hooks its
+    # OnSuccess= and OnFailure=. It runs once the module lock is in force
+    # (nixhost-module-lock-point, from monitoring), so a module the lock
+    # refuses shows up as a failing check.
+    systemd.services.nixhost-boot-check = lib.mkIf hc.enable {
+      description = "Check the box after a boot";
+      wants = [ "network-online.target" ];
+      after = [
+        "network-online.target"
+        "multi-user.target"
+        "disable-kernel-module-loading.service"
+        "nixhost-module-lock-point.service"
+      ];
+      restartIfChanged = false;
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${lib.getExe healthCheck} boot";
+      };
+    };
+
     # Revision-lag watchdog: is the remote branch ahead of what comin deployed,
     # and the source branch ahead of the deploy branch?
     systemd.services.nixhost-deploy-lag = {

@@ -19,6 +19,7 @@
     ];
     host.environment = "production";
     deploy.repository = "ssh://git@github.com/example/config.git";
+    reboot.trial.enable = true;
     secrets.file = ./fixtures/secrets.yaml;
     monitoring.tailscale = {
       loginServer = "https://login.example.org";
