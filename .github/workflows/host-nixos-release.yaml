@@ -5,15 +5,16 @@
 # flake.lock pins). A person reads the release notes and merges it; it never
 # merges itself.
 #
-# The caller grants contents: write, actions: write and pull-requests: write,
-# and the repository allows GitHub Actions to create pull requests.
+# The caller grants contents: write, actions: write, pull-requests: write and
+# issues: write: where the repository doesn't let GitHub Actions create pull
+# requests, an issue proposes the branch instead.
 #
 #   on:
 #     schedule: [{ cron: "29 6 * * 1" }]
 #     workflow_dispatch:
 #   jobs:
 #     release:
-#       permissions: { contents: write, actions: write, pull-requests: write }
+#       permissions: { contents: write, actions: write, pull-requests: write, issues: write }
 #       uses: ethpandaops/nixos-modules/.github/workflows/host-nixos-release.yaml@<commit>
 name: host-nixos-release
 on:

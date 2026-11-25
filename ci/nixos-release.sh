@@ -1,10 +1,10 @@
 # nixos-release [--branch master] [--mode push|pr]: about a month after the
 # next NixOS release is out (nixpkgs has its YY.MM tag), propose moving the
-# repo to it (nixos-26.05 to nixos-26.11, say) as a pull request from the
-# nixos-release branch, whose check shows whether every host builds. A person
-# reads the release notes and merges it: a renamed option fails to build, but
-# a service whose behaviour changed builds and then breaks at runtime, so it
-# never merges itself.
+# repo to it (nixos-26.05 to nixos-26.11, say) on the nixos-release branch
+# with a pull request (or an issue, lib.sh's propose), whose check shows
+# whether every host builds. A person reads the release notes and lands it: a
+# renamed option fails to build, but a service whose behaviour changed builds
+# and then breaks at runtime, so it never merges itself.
 #
 # It renames the release in flake.nix's input URLs (nixos-YY.MM, and
 # release-YY.MM for inputs such as home-manager that follow it) and locks
@@ -39,8 +39,12 @@ if [ "${BASH_REMATCH[2]}" = 05 ]; then
 else
   next="$(printf '%02d' $((10#${BASH_REMATCH[1]} + 1))).05"
 fi
+# A proposal still open for this release has landed (an issue doesn't close
+# itself on landing the way a pull request does).
+current="flake.nix follows nixos-$release, the newest release out a month"
 if ! object=$(gh api "repos/NixOS/nixpkgs/git/ref/tags/$next" --jq '"\(.object.type) \(.object.sha)"' 2>/dev/null); then
   echo "NixOS $next isn't out yet"
+  close_proposal nixos-release "$branch" "$current."
   exit 0
 fi
 read -r type sha <<<"$object"
@@ -51,13 +55,14 @@ else
 fi
 if [ "$(date -u -d "$released + $min_days days" +%s)" -gt "$(date -u +%s)" ]; then
   echo "NixOS $next came out on ${released:0:10}; proposing it from $(date -u -d "$released + $min_days days" +%Y-%m-%d)"
+  close_proposal nixos-release "$branch" "$current."
   exit 0
 fi
 
-number=$(open_pr nixos-release "$branch")
-if [ -n "$number" ] && git fetch -q origin refs/heads/nixos-release &&
+open=$(proposal nixos-release "$branch")
+if [ -n "$open" ] && git fetch -q origin refs/heads/nixos-release &&
   [ "$(git show FETCH_HEAD:flake.lock | jq -r .nodes.nixpkgs.original.ref)" = "nixos-$next" ]; then
-  echo "pull request #$number already moves to NixOS $next; close it for a fresh one"
+  echo "$open already moves to NixOS $next; close it for a fresh one"
   exit 0
 fi
 

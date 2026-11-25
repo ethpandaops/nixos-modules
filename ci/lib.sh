@@ -50,14 +50,19 @@ land() {
 }
 
 # propose <mode> <branch> <message file> <pr branch>: push the commit at HEAD
-# to the pr branch, open or update its pull request against the branch (the
-# message's subject as title, the rest as body) and start its check. For the
-# jobs that only ever propose (kernel-series, nixos-release, cve-scan's
+# to the pr branch, start its check, and open or update a pull request for it
+# against the branch (the message's subject as title, the rest as body). For
+# the jobs that only ever propose (kernel-series, nixos-release, cve-scan's
 # whitelist), mode is the repo's: push means the merge button lands it, pr
 # adds how to land it as your own signed commit. Either way the commit
 # message, trailers included, is what lands.
+#
+# A repository can refuse GitHub Actions pull requests ("Allow GitHub Actions
+# to create and approve pull requests" off). There an issue proposes the
+# branch instead, with the same text, its check and how to land it; issues
+# need no such setting.
 propose() {
-  local mode=$1 branch=$2 message=$3 pr_branch=$4 number body
+  local mode=$1 branch=$2 message=$3 pr_branch=$4 title open body out
   case "$mode" in
   push | pr) ;;
   *)
@@ -66,42 +71,104 @@ propose() {
     ;;
   esac
   git push --force origin "HEAD:refs/heads/$pr_branch"
+  gh workflow run check.yaml --ref "$pr_branch"
+  title=$(head -n1 "$message")
+  open=$(proposal "$pr_branch" "$branch")
   body=$(mktemp)
-  {
-    tail -n +3 "$message"
-    if [ "$mode" = pr ]; then
+  if [[ $open != issue* ]]; then
+    proposal_body "$mode" "$branch" "$message" "$pr_branch" pr >"$body"
+    if [ -n "$open" ]; then
+      gh pr edit "${open##*#}" --title "$title" --body-file "$body"
+      return
+    fi
+    if out=$(gh pr create --base "$branch" --head "$pr_branch" --title "$title" --body-file "$body" 2>&1); then
+      echo "$out"
+      return
+    fi
+    if [[ $out != *"not permitted to create or approve pull requests"* ]]; then
+      echo "$out" >&2
+      exit 1
+    fi
+    echo "::notice::GitHub Actions may not open pull requests in $GH_REPO, so an issue proposes $pr_branch"
+  fi
+  proposal_body "$mode" "$branch" "$message" "$pr_branch" issue >"$body"
+  if [ -n "$open" ]; then
+    gh issue edit "${open##*#}" --title "$title" --body-file "$body"
+  else
+    gh issue create --title "$title" --body-file "$body"
+  fi
+}
+
+# proposal_body <mode> <branch> <message file> <pr branch> <pr|issue>: the
+# text of the pull request or issue that proposes the pr branch.
+proposal_body() {
+  local mode=$1 branch=$2 message=$3 pr_branch=$4 kind=$5 server=${GITHUB_SERVER_URL:-https://github.com}
+  if [ "$kind" = issue ]; then
+    proposal_marker "$pr_branch" "$branch"
+  fi
+  tail -n +3 "$message"
+  if [ "$kind" = issue ]; then
+    echo
+    echo "---"
+    echo "The change is the branch \`$pr_branch\`; its check:"
+    echo "$server/$GH_REPO/actions/workflows/check.yaml?query=branch%3A$pr_branch"
+    if [ "$mode" = push ]; then
       echo
-      echo "---"
-      echo "Land this as your own signed commit, not with the merge button: nodes that"
-      echo "deploy only signed commits refuse this bot's commit and GitHub's merge."
+      echo "Land it once check passes: open a pull request from"
+      echo "$server/$GH_REPO/compare/$branch...$pr_branch?expand=1 and merge it, or"
       echo
       echo "    git fetch origin $pr_branch && git switch $branch && git pull --ff-only"
-      echo "    git cherry-pick -S FETCH_HEAD"
+      echo "    git cherry-pick FETCH_HEAD"
       echo "    git push origin $branch"
       echo
-      echo "Then close this pull request; the next run opens a new one when there's more."
+      echo "Keep the commit message: its trailers tell a staged rollout what the change is."
+      echo "The next run closes this issue once there's nothing left to propose."
     fi
-  } >"$body"
-  number=$(open_pr "$pr_branch" "$branch")
-  if [ -n "$number" ]; then
-    gh pr edit "$number" --title "$(head -n1 "$message")" --body-file "$body"
-  else
-    gh pr create --base "$branch" --head "$pr_branch" --title "$(head -n1 "$message")" --body-file "$body"
   fi
-  gh workflow run check.yaml --ref "$pr_branch"
+  if [ "$mode" = pr ]; then
+    echo
+    [ "$kind" = issue ] || echo "---"
+    echo "Land this as your own signed commit, not with the merge button: nodes that"
+    echo "deploy only signed commits refuse this bot's commit and GitHub's merge."
+    echo
+    echo "    git fetch origin $pr_branch && git switch $branch && git pull --ff-only"
+    echo "    git cherry-pick -S FETCH_HEAD"
+    echo "    git push origin $branch"
+    echo
+    echo "Then close this $([ "$kind" = issue ] && echo issue || echo "pull request"); the next run opens a new one when there's more."
+  fi
 }
 
-# open_pr <pr branch> <branch>: the number of the open pull request from the
-# pr branch into the branch, or nothing.
-open_pr() {
-  gh pr list --head "$1" --base "$2" --state open --json number --jq '.[0].number // empty'
+# proposal_marker <pr branch> <branch>: the line that marks the issue
+# proposing the pr branch (an HTML comment, hidden on GitHub).
+proposal_marker() {
+  echo "<!-- proposal: $1 -> $2 -->"
 }
 
-# close_pr <pr branch> <branch> <comment>: close that pull request, if open.
-close_pr() {
+# proposal <pr branch> <branch>: the open pull request from the pr branch into
+# the branch ("pull request #12"), or else the open issue that proposes it
+# ("issue #12"), or nothing.
+proposal() {
   local number
-  number=$(open_pr "$1" "$2")
-  [ -z "$number" ] || gh pr close "$number" --comment "$3"
+  number=$(gh pr list --head "$1" --base "$2" --state open --json number --jq '.[0].number // empty')
+  if [ -n "$number" ]; then
+    echo "pull request #$number"
+    return
+  fi
+  number=$(gh api "repos/$GH_REPO/issues?state=open&creator=github-actions%5Bbot%5D&per_page=100" \
+    --jq "[.[] | select(.pull_request == null and (.body // \"\" | contains(\"$(proposal_marker "$1" "$2")\")))][0].number // empty")
+  [ -z "$number" ] || echo "issue #$number"
+}
+
+# close_proposal <pr branch> <branch> <comment>: close the pull request or
+# issue that proposes the pr branch, if one is open.
+close_proposal() {
+  local open
+  open=$(proposal "$1" "$2")
+  case "$open" in
+  "pull request #"*) gh pr close "${open##*#}" --comment "$3" ;;
+  "issue #"*) gh issue close "${open##*#}" --comment "$3" ;;
+  esac
 }
 
 # commit_as_bot <message file> [paths...]: commit as github-actions[bot].
