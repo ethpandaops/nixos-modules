@@ -5,7 +5,7 @@
 # pins, so the bump that brings a new version runs the old one). A fleet whose
 # rollout runs staging first takes master at once (0); a single host with no
 # staging waits a day (24). The caller grants contents: write and
-# actions: write (pull-requests: write too for mode pr).
+# actions: write (pull-requests: write and issues: write too for mode pr).
 #
 #   jobs:
 #     bump:

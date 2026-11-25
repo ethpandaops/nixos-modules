@@ -12,15 +12,16 @@
 # ethpandaops.reboot.holdKernelSeriesChange = false. Until then a person
 # merges and reboots.
 #
-# The caller grants contents: write, actions: write and pull-requests: write,
-# and the repository allows GitHub Actions to create pull requests.
+# The caller grants contents: write, actions: write, pull-requests: write and
+# issues: write: where the repository doesn't let GitHub Actions create pull
+# requests, an issue proposes the branch instead. auto-merge needs neither.
 #
 #   on:
 #     schedule: [{ cron: "53 5 * * *" }]
 #     workflow_dispatch:
 #   jobs:
 #     kernel:
-#       permissions: { contents: write, actions: write, pull-requests: write }
+#       permissions: { contents: write, actions: write, pull-requests: write, issues: write }
 #       uses: ethpandaops/nixos-modules/.github/workflows/host-kernel-series.yaml@<commit>
 #       with: { build: myhost }
 name: host-kernel-series
@@ -32,7 +33,7 @@ on:
         type: string
         required: true
       auto-merge:
-        description: Land the pull request once its check passed (mode push only)
+        description: Land the kernel-series branch once its check passed (mode push only)
         type: boolean
         default: false
       branch:

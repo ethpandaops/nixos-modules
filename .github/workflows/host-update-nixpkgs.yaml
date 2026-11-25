@@ -2,7 +2,7 @@
 # `min-age-hours` old, build, commit and push (or open a pull request), then
 # start check (ci/update-nixpkgs.sh at the nixos-modules commit the caller's
 # flake.lock pins). The caller grants contents: write and actions: write
-# (pull-requests: write too for mode pr).
+# (pull-requests: write and issues: write too for mode pr).
 #
 #   on:
 #     schedule: [{ cron: "17 4 * * *" }]

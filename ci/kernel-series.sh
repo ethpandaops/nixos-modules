@@ -2,13 +2,13 @@
 #   [--auto-merge true|false]: move the pinned kernel series
 # (boot.kernelPackages = pkgs.linuxPackages_7_3, say) to a newer one once
 # that series has reached x.y.4 in the locked nixpkgs and was already in the
-# channel 3 weeks ago, as a pull request from the kernel-series branch,
-# whose check builds every host. The first host's kernel says which series
+# channel 3 weeks ago, on the kernel-series branch with a pull request (or an
+# issue, lib.sh's propose), whose check builds every host. The first host's kernel says which series
 # is pinned; the pin is the attribute name in the repo's .nix files
 # (linuxPackages_X_Y, or linux_X_Y as in linuxKernel.packages.linux_X_Y).
 #
-# With --auto-merge true (mode push only), a later run lands the pull
-# request once its check passed: the same change on top of the branch,
+# With --auto-merge true (mode push only), a later run lands the branch
+# once its check passed: the same change on top of the branch,
 # built, pushed, and check started, whose pass deploys it, and the reboot
 # policy reboots in its window. Turn it on only after self-reverting reboots
 # have come through a real kernel-patch reboot on the repo's hosts, in the
@@ -95,7 +95,7 @@ while read -r version; do
 done < <(kernels nixpkgs | sort -V -r)
 echo "pinned: $current; channel release $min_days days old: ${then_rev:0:12} ($then_date); target: ${target:-none}"
 if [ -z "$target" ]; then
-  close_pr kernel-series "$branch" "Nothing to move to: no series newer than $pinned is at x.y.$min_patch in $ref and was in it $min_days days ago."
+  close_proposal kernel-series "$branch" "Nothing to move to: no series newer than $pinned is at x.y.$min_patch in $ref and was in it $min_days days ago."
   exit 0
 fi
 old_pin=${pinned/./_} new_pin=${target_series/./_}
@@ -136,7 +136,7 @@ write_message() {
       echo "This lands by itself once its check passes, and the reboot policy reboots in"
       echo "its window; a boot that fails comes back on the last good system."
     else
-      echo "A person merges this. A new series doesn't reboot by itself while"
+      echo "A person lands this. A new series doesn't reboot by itself while"
       echo "ethpandaops.reboot.holdKernelSeriesChange is on (the default): the admins"
       echo "reboot with reboot-at or reboot-now while someone can reach the console."
     fi
@@ -145,12 +145,12 @@ write_message() {
   } >"$message"
 }
 
-number=$(open_pr kernel-series "$branch")
-if [ -n "$number" ] && git fetch -q origin refs/heads/kernel-series &&
+open=$(proposal kernel-series "$branch")
+if [ -n "$open" ] && git fetch -q origin refs/heads/kernel-series &&
   git grep -qw -e "linuxPackages_$new_pin" -e "linux_$new_pin" FETCH_HEAD -- '*.nix'; then
   head=$(git rev-parse FETCH_HEAD)
   if [ "$auto_merge" != true ]; then
-    echo "pull request #$number already moves to $target_series; a person merges it"
+    echo "$open already moves to $target_series; a person lands it"
     exit 0
   fi
   read -r status conclusion < <(gh api "repos/$GH_REPO/actions/workflows/check.yaml/runs?head_sha=$head&per_page=1" \
@@ -163,17 +163,17 @@ if [ -n "$number" ] && git fetch -q origin refs/heads/kernel-series &&
     build_hosts "${hosts[@]}"
     commit_as_bot "$message" -a
     land push "$branch" "$message"
-    gh pr close "$number" --comment "Landed on $branch as $(git rev-parse HEAD) after check passed on ${head:0:12}."
+    close_proposal kernel-series "$branch" "Landed on $branch as $(git rev-parse HEAD) after check passed on ${head:0:12}."
     exit 0
     ;;
   none)
     if [ "$status" != none ]; then
-      echo "pull request #$number's check is $status; it lands once that passes"
+      echo "$open: its check is $status; it lands once that passes"
       exit 0
     fi
     ;;
   esac
-  echo "pull request #$number's check ended $conclusion; proposing it again on $branch"
+  echo "$open: its check ended $conclusion; proposing it again on $branch"
 fi
 move
 write_message
