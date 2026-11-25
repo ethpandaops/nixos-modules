@@ -17,6 +17,27 @@
       KbdInteractiveAuthentication = false;
       # Only accounts from ethpandaops.users are in this group.
       AllowGroups = [ "ssh-users" ];
+
+      # sshd's own limits per source address (OpenSSH 9.8+; invaliduser
+      # needs 10.x). A source is an IPv4 address or an IPv6 /64, which one
+      # subscriber holds whole.
+      PerSourceNetBlockSize = lib.mkDefault "32:64";
+      # Unauthenticated connections one source may hold, so a burst from
+      # one address can't fill MaxStartups' 10 slots and lock admins out.
+      PerSourceMaxStartups = lib.mkDefault 3;
+      # Refuse new connections from a source for a while after it misbehaves.
+      # Only two of OpenSSH's defaults change. invaliduser (5s by default):
+      # a connection that names a user who doesn't exist or isn't in
+      # AllowGroups, such as root or admin, refuses its source for 5 minutes.
+      # Scanners do nothing else; a person who mistypes the user name waits
+      # 5 minutes or comes over the tailnet. max (10m by default): penalties
+      # that pile up, from parallel connections, last at most an hour. A
+      # wrong key for a real account keeps the 5s default (authfail), and
+      # sshd refuses a source only once its penalties add up to more than
+      # 15s (min), so fumbling a key costs seconds.
+      PerSourcePenalties = lib.mkDefault "invaliduser:5m max:1h";
+      # Never the tailnet (Tailscale's CGNAT and ULA ranges), admins' way in.
+      PerSourcePenaltyExemptList = lib.mkDefault "100.64.0.0/10,fd7a:115c:a1e0::/48";
     };
   };
   users.groups.ssh-users = { };
