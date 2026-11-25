@@ -16,6 +16,7 @@ last_success=0  # when a fetched list last verified (loaded or unchanged)
 reason=""       # why the last fetch wasn't loaded
 detail=""
 last_reason=""
+round=0         # pulls so far, to alternate address families
 declare -A rejected=()
 for r in fetch signature invalid stale replay too_many too_wide coverage too_many_added load; do
   rejected[$r]=0
@@ -31,6 +32,12 @@ curl_config() {
   password=$(cat "$PASSWORD_FILE")
   password=${password//\\/\\\\}
   printf 'user = "%s:%s"\n' "$USER_NAME" "${password//\"/\\\"}"
+}
+
+# fetch [curl option...]: the HTTP status, with the body in $work/envelope.
+fetch() {
+  curl --silent --show-error --compressed --max-time 20 --max-filesize 16777216 \
+    --config <(curl_config) --output "$work/envelope" --write-out '%{http_code}' "$@" "$URL" 2>"$work/curl.err"
 }
 
 # load <effective> <list>: replace the contents of the sets it fills, and
@@ -79,10 +86,18 @@ load() {
 # with reason and detail set.
 pull() {
   local now code gen prev at new_mode persisted want added
+  local -a family=()
   now=$(date +%s)
   rm -f "$work/envelope" "$work/payload" "$work/payload.sig" "$work/list"
-  if ! code=$(curl --silent --show-error --compressed --max-time 20 --max-filesize 16777216 \
-    --config <(curl_config) --output "$work/envelope" --write-out '%{http_code}' "$URL" 2>"$work/curl.err"); then
+  # A dual-stack host alternates IPv4 and IPv6, so the publisher sees (and
+  # allowlists) both its addresses. If that family can't connect, it uses
+  # whichever can.
+  if [ -n "$IPV6" ]; then
+    round=$((round + 1))
+    family=(--ipv4)
+    if [ $((round % 2)) = 0 ]; then family=(--ipv6); fi
+  fi
+  if ! code=$(fetch "${family[@]}") && ! code=$(fetch); then
     fail fetch "$(head -c 200 "$work/curl.err")"
     return 1
   fi

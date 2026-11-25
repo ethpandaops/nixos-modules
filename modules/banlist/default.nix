@@ -14,19 +14,20 @@
 #   the unit sets up nothing, says so, and exits 0; the box keeps its
 #   firewall and drops nothing. Set names carry a version (-v1), so a
 #   later change to their type gets new names instead of colliding.
-# - nixhost-banlist-pull fetches the list every `interval` seconds and loads
-#   it only if: ssh-keygen -Y verify accepts its signature by one of
-#   publicKeys (namespace nixhost-banlist); it's version 1, generated within
-#   the last 10 minutes and not more than 5 minutes ahead; its generation
-#   isn't older than one this host loaded (kept across reboots); no entry is
-#   wider than /24 (IPv4) or /48 (IPv6); it has at most 5000 entries and
-#   covers at most 2^20 IPv4 addresses and 2^20 IPv6 /64s; and, when it
-#   follows the generation this host has loaded, it adds at most 500
-#   entries (not checked on the puller's first load, or when nothing is
+# - nixhost-banlist-pull fetches the list every `interval` seconds, over IPv4
+#   and IPv6 in turn on a dual-stack host (so the publisher sees both its
+#   addresses), and loads it only if: ssh-keygen -Y verify accepts its
+#   signature by one of publicKeys (namespace nixhost-banlist); it's version
+#   1, generated within the last 10 minutes and not more than 5 minutes ahead;
+#   its generation isn't older than one this host loaded (kept across
+#   reboots); no entry is wider than /24 (IPv4) or /48 (IPv6); it has at most
+#   5000 entries and covers at most 2^20 IPv4 addresses and 2^20 IPv6 /64s;
+#   and, when it follows the generation this host has loaded, it adds at most
+#   500 entries (not checked on the puller's first load, or when nothing is
 #   dropped). Otherwise it keeps what it has. Each entry's ipset timeout is
-#   its expiry, so a host that can't reach the list stops blocking
-#   on its own as entries expire. A list in mode "shadow", or a host in
-#   mode shadow, fills the shadow sets; a list in mode "empty" empties both.
+#   its expiry, so a host that can't reach the list stops blocking on its own
+#   as entries expire. A list in mode "shadow", or a host in mode shadow,
+#   fills the shadow sets; a list in mode "empty" empties both.
 #
 # Nothing here names a host, address or range of ours: the list's URL and
 # credentials default to the host's log shipping ones (monitoring.logs). Our

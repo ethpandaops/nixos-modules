@@ -1,5 +1,5 @@
-# The fleet ban list end to end: a host loads a signed list, in shadow
-# counts and drops nothing, enforcing drops new connections from the list's
+# The fleet ban list end to end: a dual-stack host fetches a signed list
+# over IPv4 and IPv6 in turn and loads it, in shadow counts and drops nothing, enforcing drops new connections from the list's
 # sources except allowed ones, refuses a list that's too wide, badly signed,
 # stale, replayed or a flood and keeps the last good one, follows the list's
 # own shadow and empty modes, and comes out with break-glass or mode off; the
@@ -18,7 +18,7 @@ let
 
   # The list's server: /srv, behind basic auth test:secret.
   listServer = pkgs.writeText "list-server.py" ''
-    import base64, functools, http.server
+    import base64, functools, http.server, socket
 
     AUTH = "Basic " + base64.b64encode(b"test:secret").decode()
 
@@ -29,9 +29,10 @@ let
                 return
             super().do_GET()
 
-    http.server.ThreadingHTTPServer(
-        ("", 8080), functools.partial(Handler, directory="/srv")
-    ).serve_forever()
+    class Server(http.server.ThreadingHTTPServer):
+        address_family = socket.AF_INET6  # and IPv4, as ::ffff:a.b.c.d
+
+    Server(("::", 8080), functools.partial(Handler, directory="/srv")).serve_forever()
   '';
 
   banlist = mode: {
@@ -184,6 +185,10 @@ in
           assert reaches(scanner, 4) and reaches(scanner, 6)
           rules = mangle()
           assert "-A PREROUTING -j nixos-ban" in rules, rules
+
+      with subtest("a dual-stack host fetches over IPv4 and IPv6 in turn"):
+          client.wait_until_succeeds("journalctl -u list-server.service | grep -qF '::ffff:${nodes.server.networking.primaryIPAddress} - '")
+          client.wait_until_succeeds("journalctl -u list-server.service | grep -qF ' ${nodes.server.networking.primaryIPv6Address} - '")
 
       with subtest("in shadow, the list's sources are counted, not dropped"):
           publish([scanner4 + "/32", client4 + "/32", net6], 1001)
