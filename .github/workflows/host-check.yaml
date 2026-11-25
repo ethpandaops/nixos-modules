@@ -4,11 +4,25 @@
 # check builds every check, the hosts' systems included. The logic is
 # ci/host-check.sh at the nixos-modules commit the caller's flake.lock pins.
 #
+#   on: { push: {}, pull_request: {}, workflow_dispatch: {} }
 #   jobs:
 #     check:
 #       uses: ethpandaops/nixos-modules/.github/workflows/host-check.yaml@<commit>
 #       with:
 #         hosts: myhost
+#     deploy:
+#       needs: check
+#       if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+#       permissions: { contents: write }
+#       uses: ethpandaops/nixos-modules/.github/workflows/host-deploy.yaml@<commit>
+#       with: { host: myhost, sha: "${{ github.sha }}" }
+#
+# A repo that deploys from master needs that deploy job. The jobs that commit
+# (update-nixpkgs, refresh-keys, bump-modules) dispatch check with
+# GITHUB_TOKEN, and a run GITHUB_TOKEN started fires no workflow_run, so a
+# deploy workflow on check's workflow_run never sees it: the dispatched check
+# deploys itself. A pushed commit's check deploys through host-deploy's
+# workflow_run caller.
 name: host-check
 on:
   workflow_call:

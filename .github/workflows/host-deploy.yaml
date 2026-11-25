@@ -1,15 +1,21 @@
 # Reusable: build a host's system at a commit whose check passed and
 # fast-forward the branch comin pulls to it (ci/host-deploy.sh at the
-# nixos-modules commit the caller's flake.lock pins). The caller decides when:
+# nixos-modules commit the caller's flake.lock pins). The caller decides when;
+# for a commit pushed to master, after its check passed:
 #
 #   on:
 #     workflow_run: { workflows: [check], types: [completed], branches: [master] }
 #   jobs:
 #     deploy:
-#       if: github.event.workflow_run.conclusion == 'success'
+#       if: github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'
 #       permissions: { contents: write }
 #       uses: ethpandaops/nixos-modules/.github/workflows/host-deploy.yaml@<commit>
 #       with: { host: myhost, sha: "${{ github.event.workflow_run.head_sha }}" }
+#
+# That doesn't cover a check the jobs that commit dispatched: a run started
+# with GITHUB_TOKEN fires no workflow_run. The caller's check deploys a
+# dispatched run on master itself, with a second job (host-check.yaml's
+# header), which is why this one takes only push.
 #
 # Give the caller no concurrency group: GitHub cancels a queued run when
 # another queues, which could drop the newest commit. Each push is a

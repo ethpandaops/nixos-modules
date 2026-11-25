@@ -78,9 +78,20 @@ caller's `flake.lock` pins (`nix run --inputs-from . nixos-modules#<script>`),
 so the logic moves with the lock and the workflow pin only carries the job
 wrapper; `GITHUB_TOKEN` can't edit workflow files, so pins move by hand. The
 jobs run with the caller's token and permissions and get only the secrets the
-caller passes. The pushing jobs push with `GITHUB_TOKEN`, which starts no
-workflow, so they dispatch the caller's `check.yaml`; a deploy caller starts
-on check's `workflow_run`. Each workflow's header has a caller example.
+caller passes. Each workflow's header has a caller example.
+
+Deploying from master takes two paths, because the jobs that commit push
+with `GITHUB_TOKEN`. That push starts no workflow, so they dispatch the
+caller's `check.yaml`; and that check's completion fires no `workflow_run`
+either (only `workflow_dispatch` and `repository_dispatch` start a run from
+`GITHUB_TOKEN`). So:
+
+- a commit pushed by a person deploys from a `deploy.yaml` on check's
+  `workflow_run`, for `event == 'push'`;
+- a dispatched check on master deploys itself: `check.yaml` has a second
+  job that `needs: check` and calls `host-deploy.yaml` with `github.sha`.
+
+Without the second job, daily updates pass check and never deploy.
 
 The jobs that commit (update-nixpkgs, refresh-keys, bump-modules) take a
 `mode`. `push`, the default, pushes to the branch, for a repo whose nodes
