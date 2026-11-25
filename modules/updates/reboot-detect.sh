@@ -44,6 +44,22 @@ for component in "${COMPONENTS[@]}"; do
   fi
 done
 
+# With trial boots (reboot-trial.nix), a reboot that would only boot the
+# confirmed system again is held, still pending: a system whose trial failed
+# isn't tried again (trial-reverted), nor one a shutdown couldn't arm a
+# trial for, or can't while nixhost-boot has failed (trial-not-armed).
+held=""
+if [ "${#changed[@]}" -gt 0 ] && [ -n "$TRIAL_FILE" ]; then
+  if systemctl is-failed -q nixhost-boot.service; then
+    held=trial-not-armed
+  elif [ -r "$TRIAL_FILE" ] && [ "$(jq -r .system "$TRIAL_FILE")" = "$(readlink -f "$target")" ]; then
+    case "$(jq -r .outcome "$TRIAL_FILE")" in
+    not-armed) held=trial-not-armed ;;
+    failed-check | deadline | hung | unconfirmed) held=trial-reverted ;;
+    esac
+  fi
+fi
+
 if [ "${#changed[@]}" -gt 0 ]; then
   since=$now
   if [ -r "$RUN/required.json" ] && [ "$(jq -r .required "$RUN/required.json")" = true ]; then
@@ -55,14 +71,21 @@ if [ "${#changed[@]}" -gt 0 ]; then
     --arg new_kernel "$(kernel_version "$target")" \
     --arg booted_systemd "$(store_name /run/booted-system/systemd)" \
     --arg new_systemd "$(store_name "$target/systemd")" \
+    --arg held "$held" \
     '{required: true, $since, components: $ARGS.positional,
       kernel: {booted: $booted_kernel, new: $new_kernel},
-      systemd: {booted: $booted_systemd, new: $new_systemd}}' \
+      systemd: {booted: $booted_systemd, new: $new_systemd},
+      held: (if $held == "" then null else $held end)}' \
     --args "${changed[@]}" >"$RUN/required.json.tmp"
   mv -f "$RUN/required.json.tmp" "$RUN/required.json"
-  printf '%s\n' "${changed[@]}" >/run/reboot-required.components
-  touch /run/reboot-required "$RUN/reboot-required"
-  echo "reboot needed for: ${changed[*]} (since $(date -u -d "@$since"))"
+  if [ -z "$held" ]; then
+    printf '%s\n' "${changed[@]}" >/run/reboot-required.components
+    touch /run/reboot-required "$RUN/reboot-required"
+    echo "reboot needed for: ${changed[*]} (since $(date -u -d "@$since"))"
+  else
+    rm -f /run/reboot-required /run/reboot-required.components "$RUN/reboot-required"
+    echo "reboot needed for: ${changed[*]} (since $(date -u -d "@$since")), held: $held"
+  fi
 else
   echo '{"required": false}' >"$RUN/required.json"
   rm -f /run/reboot-required /run/reboot-required.components "$RUN/reboot-required"
@@ -82,5 +105,10 @@ fi
     for component in "${changed[@]}"; do
       echo "nixhost_reboot_pending_component{component=\"$component\"} 1"
     done
+  fi
+  if [ -n "$held" ]; then
+    echo "# HELP nixhost_reboot_pending_held Why the pending reboot is held: trial-reverted, the deployed system's trial boot failed; trial-not-armed, no trial of it could be armed."
+    echo "# TYPE nixhost_reboot_pending_held gauge"
+    echo "nixhost_reboot_pending_held{reason=\"$held\"} 1"
   fi
 } | write_metrics nixhost_reboot_detect

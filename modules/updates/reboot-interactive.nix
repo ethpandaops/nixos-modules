@@ -15,6 +15,10 @@
 # access has to be on hand. The admins hear about it and reboot with
 # reboot-at or reboot-now; the deadline only becomes an alert.
 #
+# A deployed system whose trial boot failed (ethpandaops.reboot.trial) is
+# held too: the box went back to the last confirmed system, and another
+# reboot wouldn't try it again. It waits for a fix or `nixhost-boot retry`.
+#
 # Users run reboot-status, reboot-hold <duration>, reboot-at <time> and
 # reboot-now. Changing the schedule needs sudo. Admins set critical,
 # maxDelay or pauseUntil in the host repo.

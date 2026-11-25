@@ -172,6 +172,17 @@
           check_finished("exit-code")
           machine.succeed("systemctl reload firewall", "iptables -w -C INPUT -j nixos-fw")
 
+      with subtest("boot mode only checks: it fails without rolling back, and passes"):
+          current = machine.succeed("readlink -f /run/current-system").strip()
+          notices = machine.succeed("wc -l < /var/lib/notify-sink.log").strip()
+          machine.succeed("touch /run/fail-health")
+          machine.fail("nixhost-health-check boot")
+          assert machine.succeed("readlink -f /run/current-system").strip() == current
+          assert machine.succeed("wc -l < /var/lib/notify-sink.log").strip() == notices
+          machine.succeed("grep -qx 'nixhost_healthcheck_ok 0' /var/lib/node-exporter/nixhost_healthcheck.prom")
+          machine.succeed("rm /run/fail-health", "nixhost-health-check boot")
+          machine.succeed("grep -qx 'nixhost_healthcheck_ok 1' /var/lib/node-exporter/nixhost_healthcheck.prom")
+
       with subtest("the lag check sees the remote branch ahead of the deployed commit, and master ahead of deploy"):
           machine.succeed("systemctl start nixhost-deploy-lag.service")
           machine.succeed("grep -qx 'nixhost_deploy_upstream_check_ok 1' /var/lib/node-exporter/nixhost_deploy.prom")

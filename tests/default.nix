@@ -37,6 +37,18 @@ let
         efi
         ;
     };
+  trialTest =
+    efi: scenario:
+    import ./vm/reboot-trial.nix {
+      inherit
+        self
+        pkgs
+        nixpkgs
+        disko
+        efi
+        scenario
+        ;
+    };
 in
 {
   server = server.config.system.build.toplevel;
@@ -52,6 +64,11 @@ in
   kernel = vmTest ./vm/kernel.nix;
   raid1-disks-bios = raid1Test false;
   raid1-disks-uefi = raid1Test true;
+  reboot-trial-bios = trialTest false "core";
+  reboot-trial-uefi = trialTest true "core";
+  reboot-trial-hangs = trialTest false "hangs";
+  reboot-trial-boot-md12 = trialTest false "md12";
+  reboot-trial-boot-md10 = trialTest false "md10";
   comin-ssh = vmTest ./vm/comin-ssh.nix;
   banlist = vmTest ./vm/banlist.nix;
 

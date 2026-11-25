@@ -1,4 +1,6 @@
-# After a deployment: check sshd, routing, the firewall, DNS and the git
+# nixhost-health-check [deploy|boot]
+#
+# deploy (comin's hook): check sshd, routing, the firewall, DNS and the git
 # remote, retrying for healthCheck.timeout seconds. If they still fail, try
 # the last system that passed. Keep it only if the checks pass there and the
 # deploy is the cause; if they fail there too, the deploy isn't the cause, so
@@ -7,10 +9,21 @@
 # DNS and the git remote also depend on things outside the box. When only
 # they failed, a pass on the older system may just mean an outage ended, so
 # the deployed system gets a second try before the rollback is kept.
+#
+# boot (nixhost-boot-check, after a boot): the same checks, but it never
+# switches systems. It exits 0 once they pass and 1 when they still fail at
+# the timeout; what follows is up to the unit's OnSuccess= and OnFailure=.
+# On a trial boot (nixhost.trial= on the kernel command line), DNS and the
+# git remote, which depend on things outside the box, keep being retried
+# until NIXHOST_OUTSIDE_CHECKS_UNTIL seconds of uptime, if that's later, so a
+# short outage doesn't revert a good trial.
+#
+# Timeouts count uptime, so a clock step during the checks doesn't end them.
+mode=${1:-deploy}
 status=manual
 sha=""
 error=""
-if [ -r "$RUN_DIR/deployment.json" ]; then
+if [ "$mode" = deploy ] && [ -r "$RUN_DIR/deployment.json" ]; then
   status=$(jq -r .status "$RUN_DIR/deployment.json")
   sha=$(jq -r .sha "$RUN_DIR/deployment.json")
   error=$(jq -r .error "$RUN_DIR/deployment.json")
@@ -64,17 +77,27 @@ run_checks() {
   [ -z "$failures" ]
 }
 
+uptime_seconds() {
+  cut -d. -f1 /proc/uptime
+}
+
 # wait_healthy: retry the checks until they pass or the timeout runs out.
 # Cached answers from before an activation (resolved's DNS cache, and its
 # copy of /etc/hosts, reread at most every 2 s) could pass a system whose
 # DNS is broken, so flush them and let it settle first.
 wait_healthy() {
-  local start
+  local now local_until outside_until
   resolvectl flush-caches 2>/dev/null || true
   sleep 3
-  start=$(date +%s)
+  local_until=$(($(uptime_seconds) + $(setting .healthCheck.timeout)))
+  outside_until=$local_until
+  if [ "$mode" = boot ] && [[ " $(</proc/cmdline) " == *" nixhost.trial="* ]] &&
+    [ "${NIXHOST_OUTSIDE_CHECKS_UNTIL:-0}" -gt "$outside_until" ]; then
+    outside_until=$NIXHOST_OUTSIDE_CHECKS_UNTIL
+  fi
   until run_checks; do
-    if [ $(($(date +%s) - start)) -ge "$(setting .healthCheck.timeout)" ]; then
+    now=$(uptime_seconds)
+    if { [ -n "$local_failures" ] && [ "$now" -ge "$local_until" ]; } || [ "$now" -ge "$outside_until" ]; then
       return 1
     fi
     echo "checks failing:$failures; retrying"
@@ -122,6 +145,8 @@ if [ -z "$failures" ]; then
   else
     record_good "$current"
   fi
+elif [ "$mode" = boot ]; then
+  echo "checks failed after boot:$failures"
 else
   echo "checks failed:$failures"
   last_good=$(readlink "$STATE_DIR/last-good" || readlink -f /run/booted-system)
@@ -161,7 +186,7 @@ fi
 echo "$last_success" >"$STATE_DIR/last_success"
 
 write_metrics nixhost_healthcheck <<METRICS
-# HELP nixhost_healthcheck_ok Whether the box passed its last post-deploy health check.
+# HELP nixhost_healthcheck_ok Whether the box passed its last health check, after a deploy or a boot.
 # TYPE nixhost_healthcheck_ok gauge
 nixhost_healthcheck_ok $ok
 # HELP nixhost_healthcheck_last_run_timestamp_seconds When the health check last ran.
