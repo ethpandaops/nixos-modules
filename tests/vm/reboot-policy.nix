@@ -59,8 +59,11 @@ in
         policy()
         machine.succeed("true")
         machine.fail("systemctl is-active -q nixhost-deadline-reboot.service")
-        last_run = machine.succeed("journalctl -o cat _SYSTEMD_INVOCATION_ID=$(systemctl show -p InvocationID --value nixhost-reboot-policy)")
-        assert "waiting:" in last_run, last_run
+        # The policy records every reboot it starts before starting it. Not its
+        # "waiting:" line: journald can take that in after the run has ended,
+        # such as while it rotates after the clock is set back, and then
+        # without the run's invocation ID.
+        machine.fail("test -e /var/lib/nixhost-reboot/rebooting.json")
 
     def boot():
         machine.start()
