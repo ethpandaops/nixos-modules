@@ -1,6 +1,9 @@
 # The reboot policy end to end, driving the clock by hand:
 # - a system set to boot that isn't running yet (a `boot` deploy) needs one;
-# - a kernel change shows up in the login message, the prompt and notices;
+# - a pause moves the planned reboot to the first window after it;
+# - a kernel change shows up in notices and in the panda an SSH login with a
+#   terminal gets, worked out at login; a held reboot shows there too, and
+#   nothing does when no reboot is pending or the session has no terminal;
 # - in the window, a login, an inhibitor or a hold each stop the reboot;
 # - with nothing in the way the box reboots, and says so when it's back;
 # - a new kernel series waits for an admin, who reboots with reboot-at;
@@ -37,6 +40,8 @@ in
       minDelay = "1h";
       maxDelay = "2d";
       deadlineWarningMinutes = 1;
+      # Before the clock the test sets for everything else.
+      pauseUntil = "2029-12-31";
     };
     # The test sets the clock itself.
     services.timesyncd.enable = false;
@@ -45,6 +50,8 @@ in
   };
 
   testScript = ''
+    import re
+
     def policy():
         machine.succeed("systemctl start nixhost-reboot-policy.service")
 
@@ -79,7 +86,14 @@ in
 
     def logout(name):
         machine.succeed(f"systemctl stop {name}")
-        machine.wait_until_succeeds("nixhost-reboot status > /tmp/status && ! grep -q 'Logged in now: alice' /tmp/status")
+        machine.wait_until_succeeds("nixhost-reboot status > /tmp/status && ! grep -q 'logged in now: alice' /tmp/status")
+
+    def ssh(args):
+        return machine.succeed(f"ssh -q -i /root/key -o StrictHostKeyChecking=no {args} 2>&1")
+
+    def interactive_login():
+        # What a person sees: a shell on a terminal.
+        return machine.succeed("echo exit | ssh -tt -i /root/key -o StrictHostKeyChecking=no alice@localhost 2>&1")
 
     boot()
     # A patch release of the booted kernel's series, and a kernel of another series.
@@ -87,10 +101,13 @@ in
     patch_kernel = ".".join(booted_kernel.split(".")[:2]) + ".999"
     series_kernel = "9.9.9"
 
-    with subtest("nothing pending on a fresh boot"):
+    with subtest("nothing pending on a fresh boot, and nothing at login"):
         policy()
         machine.succeed("test ! -e /run/reboot-required")
         assert "No reboot pending" in machine.succeed("reboot-status")
+        assert machine.succeed("nixhost-reboot login") == ""
+        login_output = interactive_login()
+        assert "REBOOT" not in login_output and "reboot-status" not in login_output, login_output
 
     with subtest("a kernel parameter change needs a reboot"):
         machine.succeed(
@@ -131,6 +148,27 @@ in
             "rm /boot/grub/grub.cfg",
         )
 
+    with subtest("a pause moves the planned reboot to the first window after it"):
+        # Sun 30 Dec, paused until Mon 31 Dec 00:00: not tonight's 02:00 window, but Monday's.
+        machine.succeed("date -u -s '2029-12-30 00:00:00'")
+        fake_kernel_update(patch_kernel)
+        policy()
+        machine.succeed("date -u -s '2029-12-30 00:00:00'")
+        status = machine.succeed("reboot-status")
+        print(status)
+        assert "Mon 31 Dec 02:00 UTC" in status and "in 1d 2h, if nobody is logged in" in status, status
+        assert "Paused     by the admins until Mon 31 Dec 00:00 UTC (in 1d 0h)" in status, status
+        assert "planned Mon 31 Dec 02:00 UTC" in machine.succeed("cat /run/nixhost/reboot/status-line")
+        machine.succeed("grep -qx 'nixhost_reboot_planned_timestamp_seconds 1893376800' /var/lib/node-exporter/nixhost_reboot_policy.prom")
+        # In tonight's window it waits, and still plans Monday, not "now".
+        machine.succeed("date -u -s '2029-12-30 02:30:00'")
+        assert_still_up("the pause")
+        assert "Mon 31 Dec 02:00 UTC" in machine.succeed("reboot-status")
+        # Back on the booted system, nothing is pending.
+        machine.succeed("ln -sfn $(readlink -f /run/booted-system) /run/current-system")
+        policy()
+        machine.succeed("test ! -e /run/reboot-required")
+
     with subtest("a kernel change is detected and announced"):
         machine.succeed("date -u -s '2030-01-01 00:00:00'")
         fake_kernel_update(patch_kernel)
@@ -138,21 +176,52 @@ in
         machine.succeed("test -e /run/reboot-required")
         machine.succeed("grep -qx 'nixhost_reboot_pending 1' /var/lib/node-exporter/nixhost_reboot_detect.prom")
         machine.succeed("grep -qx 'nixhost_reboot_supervised 0' /var/lib/node-exporter/nixhost_reboot_policy.prom")
-        motd = machine.succeed("cat /run/nixhost/reboot/motd")
-        print(motd)
-        assert f"Kernel security update waiting: {booted_kernel} -> {patch_kernel}" in motd, motd
-        assert "a new kernel series" not in motd, motd
-        assert "reboot-hold 3d" in motd and "systemd-inhibit" not in motd, motd
-        assert "since Tue 01 Jan 00:00 UTC" in motd
-        # minDelay is 1h, so the first window is 02:00 that night.
-        assert "Planned reboot: Tue 01 Jan 02:00 UTC" in motd
-        assert "Hard deadline:  Thu 03 Jan 00:00 UTC" in motd
         machine.succeed("grep -q 'A reboot is pending' /var/lib/notify-sink.log")
-        # sshd shows the login message to interactive logins only.
-        login_output = machine.succeed("echo exit | ssh -tt -i /root/key -o StrictHostKeyChecking=no alice@localhost 2>&1")
-        assert "Kernel security update waiting" in login_output, login_output
+        machine.succeed("date -u -s '2030-01-01 00:00:00'")
+        login_output = interactive_login()
+        print(login_output)
+        assert "(###)._______.(###)" in login_output and "REBOOT COMING!" in login_output, login_output
+        assert f"Why        kernel {booted_kernel} -> {patch_kernel}" in login_output, login_output
+        assert "a new kernel series" not in login_output, login_output
+        assert "Since      Tue 01 Jan 00:00 UTC" in login_output, login_output
+        # minDelay is 1h, so the first window is 02:00 that night.
+        assert "Tue 01 Jan 02:00 UTC" in login_output and re.search(r"in (2h 0m|1h 59m), if nobody is logged in", login_output), login_output
+        assert re.search(r"Deadline   Thu 03 Jan 00:00 UTC \(in (2d 0h|1d 23h)\): reboots even if you're busy", login_output), login_output
+        assert "everyone to log out (logged in now: alice)" in login_output, login_output
+        assert "reboot-hold 3d" in login_output and "systemd-inhibit" not in login_output, login_output
+        # Worked out at login: half an hour on, with no policy run since, the ETA has moved.
+        machine.succeed("date -u -s '2030-01-01 00:30:00'")
+        login_output = interactive_login()
+        assert re.search(r"in 1h (30|29)m, if nobody is logged in", login_output), login_output
+
+    with subtest("sessions without a shell on a terminal get nothing: commands and scp work as before"):
+        assert ssh("alice@localhost echo hello") == "hello\n"
+        assert ssh("-tt alice@localhost echo hello").replace("\r", "") == "hello\n"
+        machine.succeed(
+            "head -c 100000 /dev/urandom > /tmp/blob",
+            "scp -q -i /root/key -o StrictHostKeyChecking=no /tmp/blob alice@localhost:blob",
+            "scp -q -i /root/key -o StrictHostKeyChecking=no alice@localhost:blob /tmp/blob.back",
+            "cmp /tmp/blob /tmp/blob.back",
+        )
+
+    with subtest("open shells show the status line when it changes, not again at a login"):
         prompt = machine.succeed("su - alice -c 'bash -i </dev/null' 2>&1")
-        assert "*** Reboot pending for an update: planned Tue 01 Jan 02:00 UTC" in prompt, prompt
+        assert "Reboot pending" not in prompt, prompt
+        prompt = machine.succeed("echo 'echo A changed line > /run/nixhost/reboot/status-line' | su - root -c 'bash -i' 2>&1")
+        assert prompt.count("*** A changed line") == 1 and "Reboot pending" not in prompt, prompt
+        policy()
+
+    with subtest("a reboot held after a failed trial says so at login, with no deadline"):
+        machine.succeed(
+            "cp /run/nixhost/reboot/required.json /tmp/required.json",
+            "jq '.held = \"trial-reverted\"' /tmp/required.json > /run/nixhost/reboot/required.json",
+        )
+        login_output = interactive_login()
+        print(login_output)
+        assert "REBOOT PENDING, BUT HELD" in login_output and "failed its trial boot" in login_output, login_output
+        assert "sudo nixhost-boot retry" in login_output, login_output
+        assert "Deadline" not in login_output and "REBOOT COMING" not in login_output, login_output
+        machine.succeed("cp /tmp/required.json /run/nixhost/reboot/required.json")
 
     with subtest("outside the window it waits"):
         assert_still_up("being outside the window")
@@ -162,6 +231,9 @@ in
     with subtest("in the window, a logged-in user stops it"):
         login("session1")
         assert_still_up("a login")
+        # The next policy run, on the quarter hour: 02:30 itself if the clock hasn't moved on.
+        status = machine.succeed("reboot-status")
+        assert re.search(r"Tue 01 Jan 02:(30|45) UTC", status) and "everyone to log out (logged in now: alice)" in status, status
 
     with subtest("an inhibitor stops it"):
         machine.succeed("systemd-run --unit=longjob systemd-inhibit --what=shutdown --why=longjob /run/current-system/sw/bin/sleep 600")
@@ -173,7 +245,8 @@ in
         machine.succeed("reboot-hold 1h")
         machine.succeed("systemctl stop longjob")
         assert_still_up("a hold")
-        assert "Held by root until Tue 01 Jan 03:30 UTC" in machine.succeed("cat /run/nixhost/reboot/motd")
+        status = machine.succeed("reboot-status")
+        assert "On hold    by root (reboot-hold) until Tue 01 Jan 03:3" in status, status
         machine.succeed("grep -q 'held the reboot' /var/lib/notify-sink.log")
 
     with subtest("with nothing in the way it reboots"):
@@ -192,12 +265,12 @@ in
         machine.succeed("date -u -s '2030-01-01 00:00:00'")
         fake_kernel_update(series_kernel)
         policy()
-        motd = machine.succeed("cat /run/nixhost/reboot/motd")
-        print(motd)
-        assert f"{booted_kernel} -> {series_kernel}, a new kernel series" in motd, motd
-        assert "doesn't reboot by itself" in motd, motd
-        assert "Admins' deadline: Thu 03 Jan 00:00 UTC" in motd, motd
-        assert "Planned reboot" not in motd, motd
+        status = machine.succeed("reboot-status")
+        print(status)
+        assert f"kernel {booted_kernel} -> {series_kernel}" in status, status
+        assert "REBOOT PENDING" in status and "a new kernel series, so an admin" in status, status
+        assert "Thu 03 Jan 00:00 UTC" in status and "the admins', not a reboot" in status, status
+        assert "REBOOT COMING" not in status, status
         machine.succeed("grep -q 'an admin will schedule it' /var/lib/notify-sink.log")
         machine.succeed("journalctl -t nixhost-notify | grep -q '(admins) .*it needs a supervised reboot'")
         # In the window, past the deadline, nobody logged in: it still waits.
@@ -206,8 +279,8 @@ in
         machine.succeed("grep -qx 'nixhost_reboot_supervised 1' /var/lib/node-exporter/nixhost_reboot_policy.prom")
 
     with subtest("an admin's reboot-at reboots it, even after the deadline"):
-        machine.succeed("reboot-at '2030-01-04 03:30'")
-        assert "Planned reboot: Fri 04 Jan 03:30 UTC, as root asked with reboot-at" in machine.succeed("cat /run/nixhost/reboot/motd")
+        status = machine.succeed("reboot-at '2030-01-04 03:30'")
+        assert "Fri 04 Jan 03:30 UTC" in status and "set by root with reboot-at" in status, status
         machine.succeed("date -u -s '2030-01-04 03:31:00'")
         machine.execute("systemctl start --no-block nixhost-reboot-policy.service")
         machine.wait_for_shutdown()
@@ -222,7 +295,8 @@ in
         login("session2")
         machine.succeed("systemd-run --unit=longjob2 systemd-inhibit --what=shutdown --why=longjob /run/current-system/sw/bin/sleep 600")
         policy()
-        assert "REBOOTING at" in machine.succeed("cat /run/nixhost/reboot/motd")
+        status = machine.succeed("reboot-status")
+        assert "REBOOTING SOON! SAVE YOUR WORK!" in status and "the deadline has passed" in status, status
         machine.succeed("grep -q 'Deadline reached' /var/lib/notify-sink.log")
         machine.wait_for_shutdown()
   '';
