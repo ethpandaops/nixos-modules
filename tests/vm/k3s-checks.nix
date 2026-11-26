@@ -163,7 +163,6 @@ in
         n = node()
         a = annotations()
         info = n["status"]["nodeInfo"]
-        print(a)
         assert a["boot-id"] == info["bootID"] == sh("cat /proc/sys/kernel/random/boot_id"), (a, info)
         assert a["kernel"] == info["kernelVersion"] == sh("uname -r"), (a, info)
         assert a["revision"] == "${revision}" and a["boot-revision"] == "${revision}", a

@@ -11,15 +11,16 @@
 # a bad commit can be reverted first.
 #
 # --after: take only commits a fleet with a staged rollout has already run.
-# The newest commit is bounded by the input's revision at the last commit
-# that fleet's first environment converged on (rollout-state's staging.json,
-# `staged`), and, when the bump needs a reboot here (the kernel, initrd,
-# systemd, kernel parameters, boot-time modules, an inhibitor or the NixOS
-# release change in a built host's fingerprint), at the last commit its
-# second environment's canaries settled on (production.json,
-# `canariesSettled`). AFTER_TOKEN reads that repo, or the job's own GH_TOKEN
-# when it isn't set (enough for a public repo). Until that fleet has a
-# rollout state at all (no host of it runs its rollout yet), nothing is gated.
+# That fleet's environments must be named staging and production. The newest
+# commit is bounded by the input's revision at the last commit its staging
+# converged on (rollout-state's staging.json, `staged`), and, when the bump
+# needs a reboot here (the kernel, initrd, systemd, kernel parameters,
+# boot-time modules, an inhibitor or the NixOS release change in a built
+# host's fingerprint), at the last commit its production canaries settled on
+# (production.json, `canariesSettled`). AFTER_TOKEN reads that repo, or the
+# job's own GH_TOKEN when it isn't set (enough for a public repo). Until that
+# fleet has a rollout-state branch at all (no host of it runs its rollout
+# yet), nothing is gated.
 input=nixos-modules repo=ethpandaops/nixos-modules min_age=0 build="" branch=master mode=push after=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -112,13 +113,17 @@ if [ -n "$after" ] && ! GH_TOKEN=${AFTER_TOKEN:-${GH_TOKEN:-}} gh api "repos/$af
   echo "::error::$who can't read $after"
   exit 1
 fi
-if [ -n "$after" ] && ! probe=$(GH_TOKEN=${AFTER_TOKEN:-${GH_TOKEN:-}} gh api "repos/$after/contents/staging.json?ref=rollout-state" --silent 2>&1); then
+if [ -n "$after" ] && ! probe=$(GH_TOKEN=${AFTER_TOKEN:-${GH_TOKEN:-}} gh api "repos/$after/branches/rollout-state" --silent 2>&1); then
   if [[ $probe != *"HTTP 404"* ]]; then
     echo "::error::can't read $after's rollout state: $probe"
     exit 1
   fi
-  echo "::notice::$after has no rollout state yet, so nothing waits for it"
+  echo "::notice::$after has no rollout-state branch yet, so nothing waits for it"
   after=""
+fi
+if [ -n "$after" ] && ! GH_TOKEN=${AFTER_TOKEN:-${GH_TOKEN:-}} gh api "repos/$after/contents/staging.json?ref=rollout-state" --silent 2>/dev/null; then
+  echo "::error::$after has a rollout-state branch without staging.json; --after reads environments named staging and production"
+  exit 1
 fi
 if [ -n "$after" ]; then
   staged=$(gate_rev staging '.staged[-1].commit')

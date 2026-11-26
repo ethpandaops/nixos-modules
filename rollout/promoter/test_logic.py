@@ -2,8 +2,7 @@
 
 The plan below has the shape lib.rolloutPlan produces, with the classes a k3s
 fleet adds (k3s-restart, and k3s-minor, which starts on the server and can't
-be mixed with boot changes). Several tests reproduce what the design reviews
-found in the first prototype; their names say which rule they hold.
+be mixed with boot changes).
 """
 
 import calendar
@@ -437,7 +436,7 @@ class Step(unittest.TestCase):
         self.assertEqual(logic.plan_step(s).kind, "halt")
 
     def test_a_trial_that_reverts_after_its_host_settled_halts_the_roll(self):
-        # Review: the next host moved on stale health while the trial reverted.
+        # The next host must not move on stale health while a trial reverts.
         refs = {**{h: OLD for h in PROD}, "p-small-1": TARGET}
         nodes = nodes_on(OLD, **{"small-1": dict(revision=OLD, boot=OLD, boot_id="boot-2", rollbacks=1)})
         s = snapshot(hosts={"p-small-1": moved(settled=NOW - 300)}, refs=refs, nodes=nodes)

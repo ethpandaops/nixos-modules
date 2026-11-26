@@ -1,7 +1,7 @@
 """The promoter's decisions, as pure functions over plain data.
 
 promote.py gathers the facts (git refs and commits, `kubectl get -o json`,
-the plan, fingerprints from `nix eval`, the check runs, alerts) and carries
+the plan, fingerprints from `nix eval`, the check workflow's runs, alerts) and carries
 out the action plan_step returns. Nothing here does I/O, so every rule has a
 unit test in test_logic.py.
 
@@ -9,8 +9,9 @@ Words used throughout:
   target     the commit an environment is rolling; it keeps it until every
              host runs it (converged) or the roll halts.
   converged  every host of the environment with a deploy branch runs the
-             target; the first environment records it as staged, with the
-             worst change class across every environment.
+             target; every environment but the last records it as staged
+             for the next, with the worst change class it brings to that
+             environment or any later one.
   settled    a moved host is back: Ready, reporting the target from its
              current boot, healthy and ready, nothing pending or held.
   in flight  moved (its branch is at the target) but not settled yet.
@@ -23,6 +24,11 @@ import time
 from dataclasses import dataclass, field
 
 ANNOTATION = "nixos.ethpandaops.io/"
+# The label kured puts on a Node it's draining for a reboot
+# (--pre-reboot-node-labels), and comin's testing branches, which a fleet the
+# promoter moves must not have.
+REBOOTING_LABEL = ("ethpandaops.io/kured", "rebooting")
+TESTING_BRANCHES = "testing-*"
 
 # Fingerprint fields compared whole when a class names them in `fields`;
 # `series` fields compare major.minor only (1.35.10+k3s1 -> 1.35).
@@ -229,7 +235,7 @@ class NodeView:
 
     name: str
     obj: dict
-    rebooting_label: tuple[str, str] = ("ethpandaops.io/kured", "rebooting")
+    rebooting_label: tuple[str, str] = REBOOTING_LABEL
 
     def ann(self, key: str, default: str = "") -> str:
         return (self.obj["metadata"].get("annotations") or {}).get(ANNOTATION + key, default)
@@ -369,7 +375,7 @@ def first_canary(waves: list[dict]) -> str | None:
     return None
 
 
-def soaks(plan: dict, env: str, waves: list[dict], hosts_state: dict, target: str, host: str) -> bool:
+def soaks(plan: dict, waves: list[dict], hosts_state: dict, target: str, host: str) -> bool:
     """Whether a host soaks after it settles: a canary does; with group
     canaries so does the first host of each group to move, and the rest of
     the group bakes once at its end; without them every host soaks."""
@@ -423,13 +429,13 @@ def newer_target(candidate: str | None, state: dict, urgent_range: bool) -> bool
     return urgent_range
 
 
-def promote_target(first_state: dict, state: dict, plan: dict, now: int) -> str | None:
-    """A later environment's eligible commit: the newest one the first
-    environment converged on for which every commit staged since this
+def promote_target(prev_state: dict, state: dict, plan: dict, now: int) -> str | None:
+    """A later environment's eligible commit: the newest one the environment
+    before it converged on for which every commit staged since this
     environment last converged has finished its promote soak, and has a
-    person's approval when it changes this environment more than the first
-    one saw."""
-    staged = first_state.get("staged", [])
+    person's approval when it changes this environment more than the one
+    before saw."""
+    staged = prev_state.get("staged", [])
     done = {state.get("convergedTarget")} | set(state.get("abandoned", []))
     start = 0
     for i, entry in enumerate(staged):
@@ -437,7 +443,7 @@ def promote_target(first_state: dict, state: dict, plan: dict, now: int) -> str 
             start = i + 1
     eligible = None
     for entry in staged[start:]:
-        soak = plan["urgent"]["promote"] if entry.get("urgent") else plan["promote"][entry.get("class", "release")]
+        soak = plan["urgent"]["promote"] if entry.get("urgent") else plan["promote"][entry["class"]]
         if now < entry["at"] + 60 * soak:
             break
         if entry.get("needsApproval") and entry["commit"] not in state.get("approved", []):
@@ -451,8 +457,7 @@ def promote_target(first_state: dict, state: dict, plan: dict, now: int) -> str 
 
 @dataclass
 class Action:
-    # need, advance, push, skip, defer, settle, converge, supersede, halt,
-    # wait or done
+    # need, advance, push, skip, defer, settle, converge, halt, wait or done
     kind: str
     host: str | None = None
     reason: str = ""
@@ -536,19 +541,18 @@ def plan_step(s: Snapshot) -> Action:
         hs = hosts_state[host]
         view = s.nodes.get(host)
         why = host_problems(view, target, hs["advancedAt"])
-        node = plan["hosts"][host].get("node")
+        node = plan["hosts"][host]["node"]
         if not why:
             lost = sorted(set(hs.get("workloads", [])) & s.cluster.unready() - set(s.state.get("baseline", {}).get("unready", [])))
             if lost:
                 why.append("workloads not back: " + ", ".join(lost[:5]))
-            if node:
-                pods = [
-                    p["metadata"]["namespace"] + "/" + p["metadata"]["name"]
-                    for p in pods_on(node, s.cluster.pods)
-                    if p["status"].get("phase") not in ("Succeeded", "Failed") and not condition(p, "Ready")
-                ]
-                if pods:
-                    why.append("pods not Ready: " + ", ".join(sorted(pods)[:5]))
+            pods = [
+                p["metadata"]["namespace"] + "/" + p["metadata"]["name"]
+                for p in pods_on(node, s.cluster.pods)
+                if p["status"].get("phase") not in ("Succeeded", "Failed") and not condition(p, "Ready")
+            ]
+            if pods:
+                why.append("pods not Ready: " + ", ".join(sorted(pods)[:5]))
         if not why:
             return Action("settle", host, "back on the target")
         state = flight_state(view, hs, target)
@@ -567,7 +571,7 @@ def plan_step(s: Snapshot) -> Action:
         at, last = settled[-1]
         cls = hosts_state[last].get("class", "reboot")
         wave = wave_of(waves, last)
-        if soaks(plan, env, waves, hosts_state, target, last):
+        if soaks(plan, waves, hosts_state, target, last):
             until = at + 60 * soak_minutes(plan, env, waves, last, cls, s.urgent)
             if s.now < until:
                 return Action("wait", last, f"soaking until {time.strftime('%H:%M UTC', time.gmtime(until))}")
@@ -611,15 +615,14 @@ def plan_step(s: Snapshot) -> Action:
 
     lane = host in s.lane
     view = s.nodes.get(host)
-    node = plan["hosts"][host].get("node")
+    node = plan["hosts"][host]["node"]
     blockers = []
-    if node and rank(plan, cls) >= rank(plan, "reboot"):
+    if rank(plan, cls) >= rank(plan, "reboot"):
         blockers += pdb_blockers(node, s.cluster)
     if not lane:
         if view is None or not view.trusted or view.ann("readiness") != "ok":
             blockers.append("not ready: " + (view.ann("readiness-failing") or view.ann("readiness", "unknown") if view else "no Node"))
-        if node:
-            blockers += [f"not ready: {w}" for w in workloads_not_ready_on(node, s.cluster)]
+        blockers += [f"not ready: {w}" for w in workloads_not_ready_on(node, s.cluster)]
     if blockers:
         if host in deferred:
             return Action("wait", host, "; ".join(blockers))
@@ -638,5 +641,5 @@ def plan_step(s: Snapshot) -> Action:
         return Action("wait", host, "alerts firing: " + ", ".join(firing[:5]))
     if not in_window(plan, env, cls, s.now):
         return Action("wait", host, f"a {cls} move waits for the promotion window")
-    workloads = sorted(s.cluster.workloads_on(node)) if node else []
+    workloads = sorted(s.cluster.workloads_on(node))
     return Action("advance", host, cls, {"workloads": workloads})

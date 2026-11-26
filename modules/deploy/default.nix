@@ -64,10 +64,9 @@ let
     util-linux
   ];
 
-  # healthCheck.extraScript runs as it did inside the old health check: plain
-  # bash, not strict, with that check's PATH, so an existing script that calls
-  # nix, git or the firewall's tools, or tolerates a failing command, still
-  # passes on a good system.
+  # healthCheck.extraScript runs as plain bash, not strict, with nix, git,
+  # openssh and the firewall's tools on its PATH, so a script that calls them,
+  # or tolerates a failing command, passes on a good system.
   extraScript = pkgs.writeShellScript "nixhost-health-check-extra" hc.extraScript;
   extraPath = lib.makeBinPath (
     common
@@ -226,8 +225,8 @@ in
         default = "";
         description = ''
           More bash run as a check (the extra check); a non-zero exit means
-          unhealthy. It runs as it always has: plain bash, without errexit or
-          nounset, with coreutils, git, openssh, jq, systemd, util-linux,
+          unhealthy. It runs as plain bash, without errexit or nounset, with
+          coreutils, git, openssh, jq, systemd, util-linux,
           iproute2, getent, nix and the firewall's tools on its PATH. Prefer a
           named check in ethpandaops.checks, which is shellchecked and strict.
         '';

@@ -8,8 +8,8 @@ One run, for one environment, in a checkout of the fleet repo:
      environment's state from the rollout-state branch;
   2. keeps the environment's target until it converges or halts, then takes
      the newest eligible commit: the first environment the newest master
-     commit whose check passed, a later one the newest commit the first
-     converged on whose promote soak (and every earlier one's) is over;
+     commit whose check passed, a later one the newest commit the one before
+     it converged on whose promote soak (and every earlier one's) is over;
   3. asks logic.plan_step what to do and repeats until it has to wait,
      filling in what the step needs (a class from fingerprints, a commit
      range's provenance, firing alerts);
@@ -17,7 +17,8 @@ One run, for one environment, in a checkout of the fleet repo:
      host's branch, so a failed push is retried and never lost.
 
 It never writes to a cluster. comin on the host applies the commit; kured
-drains and reboots.
+drains and reboots. Every host is a Kubernetes node: the promoter reads what
+a host runs and how it is from the annotations on its Node.
 
   host-promote --env staging [--apply]
   host-promote --env production --action resume|abandon [--apply]
@@ -203,7 +204,7 @@ def urgent_range(repo: Repo, plan: dict, fps: Fingerprints, env: str, start: str
     kinds = set()
     for c in commits:
         urgency = [u.lower() for u in trailers(repo, c).get("urgency", [])]
-        if urgency == ["security"] and security_only(repo, c, plan.get("vulnixWhitelist")):
+        if urgency == ["security"] and security_only(repo, c, plan["vulnixWhitelist"]):
             kinds.add("security")
         elif urgency == ["revert"]:
             kinds.add("revert")
@@ -277,12 +278,9 @@ def notify(message: str, apply: bool) -> None:
 
 
 def views(plan: dict, cluster: logic.Cluster, hosts: list[str]) -> dict[str, logic.NodeView | None]:
-    label = tuple(plan.get("rebootingLabel", ["ethpandaops.io/kured", "rebooting"]))
-    out = {}
-    for h in hosts:
-        node = plan["hosts"][h].get("node")
-        out[h] = logic.NodeView(node, cluster.nodes[node], label) if node and node in cluster.nodes else None
-    return out
+    """Each host's Node, or None when the cluster has no such Node."""
+    nodes = {h: plan["hosts"][h]["node"] for h in hosts}
+    return {h: logic.NodeView(n, cluster.nodes[n]) if n in cluster.nodes else None for h, n in nodes.items()}
 
 
 # One run
@@ -304,7 +302,7 @@ class Promoter:
         self.saved = json.dumps(self.state, sort_keys=True)
         self.hosts = [h for w in logic.waves_of(self.plan, self.env) for h in w["hosts"]]
         self.repo_name = os.environ.get("GITHUB_REPOSITORY") or run("gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner").strip()
-        self.cluster = load_cluster(args.context) if any(self.plan["hosts"][h].get("node") for h in self.hosts) else logic.Cluster(nodes={})
+        self.cluster = load_cluster(args.context)
         self.nodes = views(self.plan, self.cluster, self.hosts)
 
     @property
@@ -339,7 +337,9 @@ class Promoter:
         return None if target in abandoned else target
 
     def new_roll(self, target: str, lane: list[str], why: str) -> None:
-        keep = {k: self.state[k] for k in ("staged", "converged", "convergedTarget", "approved", "abandoned", "canariesSettled") if k in self.state}
+        keep = {k: self.state[k] for k in ("staged", "convergedTarget", "approved", "abandoned", "canariesSettled") if k in self.state}
+        # startedAt, like each host's "from", is a record for people reading
+        # rollout-state; the promoter doesn't read it.
         self.state = {**keep, "target": target, "startedAt": self.now, "baseline": logic.baseline(self.cluster), "hosts": {}, "lane": lane}
         self.say(f"rolling {target[:12]} ({why})")
 
@@ -448,7 +448,6 @@ class Promoter:
         class it brings to this or any later environment."""
         mine = logic.worst(self.plan, [hs.get("class", "reboot") for hs in self.state["hosts"].values() if hs.get("target") == target])
         self.state["convergedTarget"] = target
-        self.state.setdefault("converged", []).append({"commit": target, "at": self.now})
         order = self.plan["environmentOrder"]
         later = set(order[logic.env_index(self.plan, self.env) + 1 :])
         if not later:
@@ -473,9 +472,7 @@ class Promoter:
                 old = None
             classes.append(logic.classify(self.plan, old, new))
         theirs = logic.worst(self.plan, classes)
-        lock = json.loads(self.repo.file(target, "flake.lock") or "{}")
-        modules = lock.get("nodes", {}).get(self.plan.get("modulesInput", "nixos-modules"), {}).get("locked", {}).get("rev")
-        entry = {"commit": target, "at": self.now, "class": logic.worst(self.plan, [mine, theirs]), "urgent": snap.urgent, "modules": modules}
+        entry = {"commit": target, "at": self.now, "class": logic.worst(self.plan, [mine, theirs]), "urgent": snap.urgent}
         if logic.rank(self.plan, theirs) > logic.rank(self.plan, mine):
             entry["needsApproval"] = True
         self.state.setdefault("staged", []).append(entry)
@@ -514,7 +511,7 @@ class Promoter:
             nodes=self.nodes,
             cluster=self.cluster,
             held=self.repo.file(self.repo.ref(self.source), self.plan["holdFile"]) is not None,
-            testing=self.repo.branches(self.plan.get("testingBranchPattern", "testing-*")),
+            testing=self.repo.branches(logic.TESTING_BRANCHES),
             urgent=bool(start and start != target and urgent_range(self.repo, self.plan, self.fps, self.env, start, target, start)),
             lane=lane,
         )
@@ -617,7 +614,8 @@ class Promoter:
 
 def gate(args) -> int:
     """Read-only: what blocks moving one node now (pre), or why it isn't back
-    on a commit (post). The migration scripts use it."""
+    on a commit (post), for a person or a script moving a node by hand, such
+    as a fleet's migration onto NixOS."""
     cluster = load_cluster(args.context)
     if args.node not in cluster.nodes:
         print(f"no Node {args.node}")

@@ -224,10 +224,7 @@ class Fleet(unittest.TestCase):
             "holdFile": "rollout/hold",
             "checkWorkflow": "check.yaml",
             "vulnixWhitelist": "vulnix-whitelist.toml",
-            "modulesInput": "nixos-modules",
             "allowedSigners": self.signers,
-            "rebootingLabel": ["ethpandaops.io/kured", "rebooting"],
-            "testingBranchPattern": "testing-*",
         }
 
     def set_cluster(self, running, **node_over):
@@ -338,6 +335,20 @@ class Promote(Fleet):
         state = self.state("production")
         self.assertNotIn("halted", state)
         self.assertEqual(state["hosts"]["p1"]["counts"], 1)
+
+    def gate(self, phase, node, target=None):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = promote.gate(argparse.Namespace(phase=phase, node=node, context=None, target=target))
+        return code, out.getvalue()
+
+    def test_gate_reports_a_node_back_on_its_commit_or_why_not(self):
+        self.assertEqual(self.gate("post", "n-p1", self.c0), (0, "n-p1: post gates pass\n"))
+        code, out = self.gate("post", "n-p1", self.c1)
+        self.assertEqual(code, 1)
+        self.assertIn(f"runs {self.c0[:12]}", out)
+        self.assertEqual(self.gate("pre", "n-p1"), (0, "n-p1: pre gates pass\n"))
+        self.assertEqual(self.gate("pre", "n-missing"), (1, "no Node n-missing\n"))
 
     def test_abandon_drops_the_target(self):
         self.put_state("staging", {"target": self.c1, "halted": {"reason": "x", "host": "s1"}, "hosts": {}})

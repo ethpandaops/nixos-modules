@@ -59,7 +59,7 @@ let
   '';
 
   check =
-    name: c:
+    c:
     if c.unit != null then
       {
         runtimeInputs = [ pkgs.systemd ];
@@ -162,7 +162,7 @@ let
       {
         name = "nixhost-check-${name}";
       }
-      // check name c
+      // check c
     );
 
   list = pkgs.writeText "nixhost-checks.json" (
@@ -274,9 +274,9 @@ let
                   description = "A label selector.";
                 };
                 min = lib.mkOption {
-                  type = lib.types.int;
+                  type = lib.types.ints.positive;
                   default = 1;
-                  description = "How many of them must be Ready, at least 1.";
+                  description = "How many of them must be Ready.";
                 };
               };
             }
@@ -365,10 +365,6 @@ in
             message = "ethpandaops.checks.${name}: set exactly one of ${lib.concatStringsSep ", " kinds}; it has ${
               if typesOf c == [ ] then "none" else lib.concatStringsSep " and " (typesOf c)
             }.";
-          }
-          {
-            assertion = c.k8sPod == null || c.k8sPod.min >= 1;
-            message = "ethpandaops.checks.${name}.k8sPod.min must be at least 1.";
           }
           {
             assertion = !(c.outside && c.kind == "readiness");

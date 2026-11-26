@@ -79,8 +79,9 @@ in
     internal = true;
     readOnly = true;
     description = ''
-      The rollback breaker's shell helpers (breaker.sh): breaker_open,
-      breaker_trip, breaker_close, breaker_blocked and guard_differs, for
+      The rollback breaker's shell helpers (breaker.sh): breaker_get,
+      breaker_open, breaker_trip, breaker_close, breaker_blocked,
+      breaker_metrics and guard_differs, for
       scripts that have ethpandaops.lib.shell, and coreutils and jq on their
       PATH.
     '';

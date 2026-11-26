@@ -20,8 +20,8 @@
 #   jobs:
 #     promote:
 #       strategy:
-#         # One environment at a time: the later one reads what the first
-#         # staged, and both write the rollout-state branch.
+#         # One environment at a time: each reads what the one before it
+#         # staged, and all of them write the rollout-state branch.
 #         max-parallel: 1
 #         matrix:
 #           environment: ${{ fromJSON(github.event_name == 'schedule' && '["staging","production"]' || format('["{0}"]', inputs.environment)) }}
@@ -36,8 +36,11 @@
 #         kubeconfig: ${{ matrix.environment == 'staging' && secrets.KUBECONFIG_STAGING || secrets.KUBECONFIG_PRODUCTION }}
 #         discord-webhook: ${{ secrets.ROLLOUT_DISCORD_WEBHOOK }}
 #
-# GitHub cancels a queued run when another queues in the same concurrency
-# group; for the promoter that only drops a run the next one repeats.
+# Runs of one environment never overlap (the concurrency group), which
+# rollout-state's writes rely on. GitHub cancels a run that is waiting in the
+# group when another one queues: a scheduled run the next one repeats, but
+# also a resume, abandon or approve dispatched while a run is in progress.
+# Check that a manual run ran, and dispatch it again if it was cancelled.
 name: host-promote
 on:
   workflow_call:
@@ -64,7 +67,7 @@ on:
     secrets:
       kubeconfig:
         description: A read-only kubeconfig for the environment's cluster
-        required: false
+        required: true
       discord-webhook:
         required: false
       grafana-token:
@@ -91,13 +94,10 @@ jobs:
           KUBECONFIG_DATA: ${{ secrets.kubeconfig }}
           ENVIRONMENT: ${{ inputs.environment }}
         run: |
+          # A secret that isn't set in the caller's repo arrives empty.
           if [ -z "$KUBECONFIG_DATA" ]; then
-            # A fleet whose hosts aren't Kubernetes nodes needs none.
-            if [ "$(nix eval --json .#rolloutPlan --apply "p: builtins.any (h: h.env == \"$ENVIRONMENT\" && h.node != null) (builtins.attrValues p.hosts)")" = true ]; then
-              echo "::error::$ENVIRONMENT's hosts are Kubernetes nodes, but the caller passed no kubeconfig secret (an empty or missing secret)"
-              exit 1
-            fi
-            exit 0
+            echo "::error::the kubeconfig secret for $ENVIRONMENT is empty: is it set in the repository's secrets?"
+            exit 1
           fi
           mkdir -p ~/.kube
           printf '%s' "$KUBECONFIG_DATA" >~/.kube/config

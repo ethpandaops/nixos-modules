@@ -65,7 +65,7 @@ A host repo's workflows call the reusable ones here, pinned by commit:
 | `host-deploy.yaml` | builds a host at a commit whose check passed and fast-forwards the branch comin pulls |
 | `host-update-nixpkgs.yaml` | moves nixpkgs to the newest channel release at least a day old |
 | `host-refresh-keys.yaml` | refreshes `keys/<login>.keys` from GitHub for the people already listed, with a webhook notice |
-| `host-bump-modules.yaml` | moves `nixos-modules` to the newest master commit whose check passed and that is old enough; with `after`, only to one another fleet's staged rollout has run |
+| `host-bump-modules.yaml` | moves `nixos-modules` to the newest master commit whose check passed and that is old enough; with `after`, only to a commit another fleet's staged rollout has run |
 | `host-promote.yaml` | one run of a fleet's staged rollout for one environment (below) |
 | `host-cve-scan.yaml` | scans the hosts' systems with vulnix; takes a channel release at once when it fixes a critical CVE, and proposes whitelisting the critical CVEs that have evidence they don't apply, for a person to check |
 | `host-kernel-series.yaml` | proposes moving the pinned kernel series once a newer one is at x.y.4 and has been in the channel 3 weeks; with `auto-merge`, lands it once its check passed |
@@ -125,43 +125,46 @@ reword loses the trailers).
 
 ## Staged rollouts
 
-A fleet of many hosts rolls a commit one host at a time instead of moving
-one `deploy` branch for all: environment by environment (staging, then
+A fleet of Kubernetes nodes rolls a commit one node at a time instead of
+moving one `deploy` branch for all: environment by environment (staging, then
 production), canaries first, then groups in order, with `last` groups at the
 end. Each host pulls its own `deploy/<host>` branch, and the promoter
-(`rollout/promoter`, run by `host-promote.yaml`) is the only writer of
-those branches and of `rollout-state`, where it keeps what it did. It never
-writes to a cluster: comin applies the commit, and kured, on a Kubernetes
-fleet, drains and reboots.
+(`rollout/promoter`, run by `host-promote.yaml`) is the only writer of those
+branches and of `rollout-state`, where it keeps what it did. It reads each
+host's state from the annotations `node-report` writes on its Node, so every
+host sets `ethpandaops.kubernetes`. It never writes to a cluster: comin
+applies the commit, and kured drains and reboots.
 
 - **Where a host stands:** `ethpandaops.rollout.{group,canary,lead}` and
   `ethpandaops.host.environment`. The fleet's flake exports
   `rolloutPlan = nixos-modules.lib.rolloutPlan { hosts = self.nixosConfigurations; groups = [ … ]; last = [ … ]; }`
   ([lib/rollout-plan.nix](lib/rollout-plan.nix) lists every setting: change
   classes, soaks, promotion windows, kured's timings, the alert gate).
-- **When a host moves:** the target is on the source branch, its check
-  passed, and every commit up to it is signed by a listed key when the hosts
-  set `allowedSignersFile` (without it, write access is the trust line); the
-  host's readiness checks pass; on a Kubernetes fleet no PodDisruptionBudget blocks its drain, its
+- **When a host moves:** the target is on the source branch and its check
+  passed; when the hosts set `allowedSignersFile`, every commit up to it is
+  signed by a listed key (without it, write access is the trust line). The
+  host's readiness checks pass, no PodDisruptionBudget blocks its drain, its
   workloads are ready, nothing in the cluster is worse than when the roll
   started, and no Grafana alert for it fires.
-- **When it's done:** it reports the target from its current boot (the
-  `node-report` annotations, trusted only when their boot ID and kernel
-  match what the kubelet reports), healthy, ready, no reboot pending or held,
-  its trial boot confirmed; then a canary soaks for its change class. Every
-  moved host stays watched until the environment converges.
-- **What stops it:** a rollback or trial revert, a host past its time budget
-  in a state (deploy, kured's lock, drain, boot, readiness), a failed
-  readiness check, a health check failing with the rollback breaker open,
-  or a target that fails provenance. A person resumes, abandons the target,
-  or lands a fix; `rollout/hold` on the source branch pauses it.
+- **When it's done:** it reports the target from its current boot (trusted
+  only when the annotations' boot ID and kernel match what the kubelet
+  reports), healthy, ready, no reboot pending or held, its trial boot
+  confirmed; then a canary soaks for its change class. Every moved host stays
+  watched until the environment converges.
+- **What stops it:** among others, a rollback or trial revert, a host past its
+  time budget in a state (deploy, kured's lock, drain, boot, readiness), a
+  failed readiness check, a health check failing with the rollback breaker
+  open, the cluster staying worse than when the roll started, a target that
+  fails provenance or doesn't evaluate, and a `testing-*` branch. A person
+  resumes, abandons the target, or lands a fix; `rollout/hold` on the source
+  branch pauses it.
 - **Between environments:** a later one takes a commit only after the one
   before converged on it and its promote soak passed for the worst class
-  across both; a commit that changes it more than the first saw waits for
-  `approve`. Only a range of `Urgency:` commits with evidence (a
+  across both; a commit that changes it more than the one before saw waits
+  for `approve`. Only a range of `Urgency:` commits with evidence (a
   nixpkgs-only security fix, or a revert that restores the last converged
-  systems, and signed where the hosts require it) shortens soaks or preempts
-  a roll.
+  systems, signed where the hosts require it) shortens soaks or preempts a
+  roll.
 
 ## Change
 

@@ -10,6 +10,10 @@
 #
 # and `nix eval --json .#rolloutPlan` is what the promoter reads.
 #
+# Every host must be a Kubernetes node (ethpandaops.kubernetes.nodeName): the
+# promoter reads what a host runs, and whether it's healthy and ready, from
+# the annotations node-report writes on its Node.
+#
 # Order, outermost first: environment (ethpandaops.host.environment, in
 # `environments` order; a later one takes only commits the one before
 # converged on and soaked), then waves: the canaries (ethpandaops.rollout.
@@ -74,7 +78,6 @@
   holdFile ? "rollout/hold",
   checkWorkflow ? "check.yaml",
   vulnixWhitelist ? null,
-  modulesInput ? "nixos-modules",
 }:
 let
   info = lib.mapAttrs (
@@ -90,7 +93,7 @@ let
       env = c.ethpandaops.host.environment;
       fleet = c.ethpandaops.host.fleet;
       inherit (c.ethpandaops.rollout) group canary lead;
-      node = c.ethpandaops.kubernetes.nodeName or null;
+      node = c.ethpandaops.kubernetes.nodeName;
       deployBranch = c.ethpandaops.deploy.branch;
       readinessMinutes = (lib.foldl' lib.max 0 (map (check: check.timeout) readiness) + 59) / 60;
       trialMinutes = if trial.enable then (trial.deadline + 59) / 60 else 0;
@@ -215,10 +218,28 @@ let
   waves = lib.genAttrs environments wavesFor;
   inWaves = lib.concatMap (env: lib.concatMap (w: w.hosts) waves.${env}) environments;
 
-  missing = lib.concatMap (
-    table: lib.concatMap (env: lib.filter (c: !(table.${env} ? ${c})) classNames) (lib.attrNames table)
-  ) [ soakFor ];
+  missing = lib.concatMap (env: lib.filter (c: !(soakFor.${env} ? ${c})) classNames) environments;
+  windows' = lib.mapAttrs (_: w: {
+    days =
+      w.days or [
+        1
+        2
+        3
+        4
+        5
+      ];
+    start = clock w.start;
+    end = clock w.end;
+    fromClass = w.fromClass or "reboot";
+  }) windows;
 in
+assert lib.assertMsg (lib.all (h: h.node != null) (lib.attrValues info))
+  "rolloutPlan: every host must set ethpandaops.kubernetes.nodeName; the promoter reads each host's state from its Node";
+assert lib.assertMsg (lib.elem "reboot" classNames)
+  "rolloutPlan: `classes` must have a reboot class; the drain gate and the promotion window start there";
+assert lib.assertMsg (lib.all (w: lib.elem w.fromClass classNames) (
+  lib.attrValues windows'
+)) "rolloutPlan: a window's fromClass must be one of `classes`";
 assert lib.assertMsg (lib.sort lib.lessThan inWaves == lib.sort lib.lessThan (lib.attrNames info))
   "rolloutPlan: every host must be in exactly one wave; check each host's environment is in `environments`";
 assert lib.assertMsg (lib.all (h: !(h.canary && lib.elem h.group last)) (
@@ -236,7 +257,13 @@ assert lib.assertMsg (builtins.length fleets <= 1) "rolloutPlan: every host must
   fleet = lib.head (fleets ++ [ "fleet" ]);
   environmentOrder = environments;
   environments = lib.mapAttrs (_: ws: { waves = ws; }) waves;
-  hosts = lib.mapAttrs (_: h: removeAttrs h [ "signers" ]) info;
+  hosts = lib.mapAttrs (
+    _: h:
+    removeAttrs h [
+      "signers"
+      "trialMinutes"
+    ]
+  ) info;
   inherit
     classes
     groupCanaries
@@ -246,7 +273,6 @@ assert lib.assertMsg (builtins.length fleets <= 1) "rolloutPlan: every host must
     holdFile
     checkWorkflow
     vulnixWhitelist
-    modulesInput
     ;
   soak = soakFor;
   canaryExtra = canaryExtra';
@@ -258,23 +284,6 @@ assert lib.assertMsg (builtins.length fleets <= 1) "rolloutPlan: every host must
   // urgent;
   budgets = budgets';
   kured = kured';
-  windows = lib.mapAttrs (_: w: {
-    days =
-      w.days or [
-        1
-        2
-        3
-        4
-        5
-      ];
-    start = clock w.start;
-    end = clock w.end;
-    fromClass = w.fromClass or "reboot";
-  }) windows;
+  windows = windows';
   allowedSigners = lib.head (signers ++ [ null ]);
-  rebootingLabel = [
-    "ethpandaops.io/kured"
-    "rebooting"
-  ];
-  testingBranchPattern = "testing-*";
 }

@@ -31,7 +31,8 @@ let
     };
   update-nixpkgs = script "update-nixpkgs" [ pkgs.gh ];
   # The promoter (rollout/promoter): Python's standard library, read-only
-  # kubectl, gh for check runs, and ssh-keygen for `git verify-commit`.
+  # kubectl, gh for the check workflow's runs, and ssh-keygen for
+  # `git verify-commit`.
   host-promote = pkgs.writeShellApplication {
     name = "host-promote";
     runtimeInputs = with pkgs; [
