@@ -232,6 +232,14 @@ class Classify(unittest.TestCase):
     def test_module_list_change_is_reboot(self):
         self.assertEqual(logic.classify(PLAN, fp(), fp(toplevel="2", kernelModules=["overlay", "wireguard"])), "reboot")
 
+    def test_fields_the_old_fingerprint_lacks_are_unknown_not_changed(self):
+        # A host's running commit, from before nixos-modules added kernelVersion
+        # and nixosRelease, against a target that has them.
+        old = {k: v for k, v in fp().items() if k not in ("kernelVersion", "nixosRelease")}
+        self.assertEqual(logic.classify(PLAN, old, fp(toplevel="2")), "switch")
+        self.assertEqual(logic.classify(PLAN, old, fp(toplevel="2", kernel="k2", kernelVersion="6.19.1")), "reboot")
+        self.assertEqual(logic.mixed(PLAN, "k3s-minor", {k: v for k, v in fp().items() if k != "kernel"}, fp(kernel="k2")), [])
+
     def test_unknown_start_is_reboot(self):
         self.assertEqual(logic.classify(PLAN, None, fp()), "reboot")
 

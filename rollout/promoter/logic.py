@@ -48,6 +48,15 @@ def worst(plan: dict, classes) -> str:
     return max(classes, key=names.index, default="none")
 
 
+def differs(old: dict, new: dict, field: str, by=lambda v: v) -> bool:
+    """Whether a fingerprint field changed. A field only one side has is
+    unknown, not changed: a commit from before the field existed (an older
+    nixos-modules, or a fleet that just added it) has no value to compare,
+    and the fields that change with it (the kernel's store path for its
+    version) still count."""
+    return field in old and field in new and by(old[field]) != by(new[field])
+
+
 def classify(plan: dict, old: dict | None, new: dict) -> str:
     """The most disruptive class between two fingerprints of one host.
 
@@ -59,8 +68,8 @@ def classify(plan: dict, old: dict | None, new: dict) -> str:
         return "none"
     found = plan["classes"][0]["name"]
     for c in plan["classes"]:
-        changed = any(old.get(f) != new.get(f) for f in c.get("fields", []))
-        changed = changed or any(series(old.get(f, "")) != series(new.get(f, "")) for f in c.get("series", []))
+        changed = any(differs(old, new, f) for f in c.get("fields", []))
+        changed = changed or any(differs(old, new, f, series) for f in c.get("series", []))
         if changed:
             found = c["name"]
     return found
@@ -72,7 +81,7 @@ def mixed(plan: dict, cls: str, old: dict | None, new: dict) -> list[str]:
     if old is None:
         return []
     spec = next((c for c in plan["classes"] if c["name"] == cls), {})
-    return [f for f in spec.get("alone", []) if old.get(f) != new.get(f)]
+    return [f for f in spec.get("alone", []) if differs(old, new, f)]
 
 
 # Kubernetes objects
