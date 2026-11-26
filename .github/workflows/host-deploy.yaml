@@ -36,9 +36,13 @@ on:
         description: The branch comin pulls
         type: string
         default: deploy
+      runs-on:
+        description: 'The runner: a label, or JSON for labels or a runner group, such as {"group": "my-hosts", "labels": ["my-hosts"]} (README: Self-hosted runners)'
+        type: string
+        default: ubuntu-latest
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (startsWith(inputs.runs-on, '{') || startsWith(inputs.runs-on, '[')) && fromJSON(inputs.runs-on) || inputs.runs-on }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -25,6 +25,10 @@ on:
         description: "push to the branch, or pr: a pull request a person lands as their own signed commit (for nodes that deploy only signed commits)"
         type: string
         default: push
+      runs-on:
+        description: 'The runner: a label, or JSON for labels or a runner group, such as {"group": "my-hosts", "labels": ["my-hosts"]} (README: Self-hosted runners)'
+        type: string
+        default: ubuntu-latest
     secrets:
       webhook:
         description: A Discord webhook URL (plain or ending in /slack) for the notices
@@ -32,7 +36,7 @@ on:
 jobs:
   refresh:
     if: github.ref_name == inputs.branch
-    runs-on: ubuntu-latest
+    runs-on: ${{ (startsWith(inputs.runs-on, '{') || startsWith(inputs.runs-on, '[')) && fromJSON(inputs.runs-on) || inputs.runs-on }}
     timeout-minutes: 60
     env:
       GH_TOKEN: ${{ github.token }}

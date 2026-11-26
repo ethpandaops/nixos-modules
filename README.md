@@ -123,6 +123,45 @@ shorten a rollout's waits but never skips its canaries or gates. Land a
 proposal with its message intact (`git cherry-pick` keeps it; a squash or
 reword loses the trailers).
 
+### Self-hosted runners
+
+Every host workflow takes `runs-on`, `ubuntu-latest` unless the caller sets
+it: a label, or JSON for a list of labels or a runner group, such as
+`{"group": "my-hosts", "labels": ["my-hosts"]}`. With the group named, no
+runner outside it takes the job, whatever its labels. This repo's own check
+stays on GitHub-hosted runners.
+
+A job holds the caller's token, and where a repository has no branch rules
+(a private one on GitHub Free) a job with `contents: write` can push any
+branch, the one comin pulls included: whoever controls the runner is root on
+the hosts. So a host repo's self-hosted runners:
+
+- run one job each and are gone: a fresh VM or pod per job (an ephemeral or
+  just-in-time runner). A runner that stays keeps what a job left on it, a
+  backdoor say, and reads the next job's token; install-nix-action writes
+  the token into `/etc/nix/nix.conf`.
+- sit in a runner group only the host repos may use, with public
+  repositories not allowed: a public repo's pull request from a fork runs
+  anyone's code on every runner the repo can use.
+- never run a fork's pull request: callers skip one
+  (`if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`).
+- are x86_64-linux with systemd, curl, xz, python3 and passwordless sudo,
+  for install-nix-action's multi-user install with the build sandbox; on a
+  runner that has Nix, it leaves that Nix alone. No job here needs KVM or
+  Docker: the VM tests are this repo's own check.
+
+Caching works as it does on GitHub-hosted runners: `actions/cache`
+(cve-scan's NVD feeds) is GitHub's service, and each job's Nix store starts
+empty and substitutes from cache.nixos.org. Give the runners no store that
+outlives a job and no signing key for a binary cache the hosts trust: the
+first lets one job reach the next, the second reaches the hosts.
+
+The runners decide who can take over a job; what a job can do is its
+token's. With `ethpandaops.deploy.allowedSignersFile` (the hosts deploy only
+commits signed by a listed key, which no runner holds) and `mode: pr`, a job
+that pushes the deploy branch still deploys nothing a person didn't sign.
+Without it, write access, the runners' included, is root on the hosts.
+
 ## Staged rollouts
 
 A fleet of Kubernetes nodes rolls a commit one node at a time instead of

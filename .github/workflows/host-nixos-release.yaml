@@ -27,10 +27,14 @@ on:
         description: "push: the merge button lands it; pr: a person lands it as their own signed commit (for nodes that deploy only signed commits)"
         type: string
         default: push
+      runs-on:
+        description: 'The runner: a label, or JSON for labels or a runner group, such as {"group": "my-hosts", "labels": ["my-hosts"]} (README: Self-hosted runners)'
+        type: string
+        default: ubuntu-latest
 jobs:
   release:
     if: github.ref_name == inputs.branch
-    runs-on: ubuntu-latest
+    runs-on: ${{ (startsWith(inputs.runs-on, '{') || startsWith(inputs.runs-on, '[')) && fromJSON(inputs.runs-on) || inputs.runs-on }}
     timeout-minutes: 30
     env:
       GH_TOKEN: ${{ github.token }}
