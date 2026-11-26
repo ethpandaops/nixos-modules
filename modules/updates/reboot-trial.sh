@@ -23,11 +23,14 @@
 # How a trial ended (trial.json's outcome): confirmed; failed-check,
 # deadline or hung, the reverts nixhost_boot_reverts_total counts;
 # unconfirmed, shut down before its check passed; not-armed, the shutdown
-# couldn't set it up; unsupported, GRUB couldn't clear its flag, so trials
-# stop on this box; bypassed, GRUB booted it from its own menu entry. After
-# unconfirmed, not-armed or a revert, the system isn't tried again until
-# another is deployed or an admin runs retry, and reboot-detect holds its
-# reboot.
+# couldn't set it up, or the preArm hook refused it; skipped, the preArm
+# hook, or a rollback guard that differs, had the system boot without a
+# trial, as the confirmed one; held, it would have reverted but the
+# rollback breaker is open, so it stays up; unsupported, GRUB couldn't clear
+# its flag, so trials stop on this box; bypassed, GRUB booted it from its
+# own menu entry. After unconfirmed, not-armed, held or a revert, the system
+# isn't tried again until another is deployed or an admin runs retry, and
+# reboot-detect holds its reboot.
 STATE=/var/lib/nixhost-boot
 TRIAL=$STATE/trial.json
 RUN=/run/nixhost/boot
@@ -107,18 +110,41 @@ record() {
 }
 
 # resolve <outcome> <detail>: how the last trial ended. Only failed-check,
-# deadline and hung count as reverts.
+# deadline and hung count as reverts, and trip the rollback breaker; a
+# confirmed trial closes it.
 resolve() {
+  local system
   jq --arg outcome "$1" --arg detail "$2" --argjson at "$now" \
     '.outcome = $outcome | .detail = $detail | .resolvedAt = $at | del(.reported)' "$TRIAL" >"$TRIAL.tmp"
   mv -f "$TRIAL.tmp" "$TRIAL"
+  system=$(trial .system)
   case "$1" in
   failed-check | deadline | hung)
     echo $(($(readnum "$STATE/reverts_total") + 1)) >"$STATE/reverts_total"
+    breaker_trip "trial of ${system##*/} reverted" "$system"
+    ;;
+  confirmed)
+    if breaker_open; then
+      breaker_close "trial of ${system##*/} confirmed" "$system"
+      notify_admins info "Rollback breaker closed" "The rollback breaker closed: the trial boot of ${system##*/} passed its boot check, so automatic rollbacks and trial reverts are back on."
+    fi
     ;;
   esac
   sync -f "$STATE"
-  echo "trial of $(trial .system): $1 ($2)"
+  echo "trial of $system: $1 ($2)"
+}
+
+# hold <what happened>: a pending trial that would revert while the rollback
+# breaker is open stays up on the trial system instead, for a person.
+hold() {
+  local since reason
+  since=$(date -u -d "@$(breaker_get .since)" '+%F %T UTC')
+  reason=$(breaker_get .reason)
+  resolve held "$1, but the rollback breaker is open ($reason)"
+  status_set trial '"held"'
+  breaker_blocked
+  metrics
+  notify_admins critical "Trial boot held" "The trial boot of ${booted##*/} would revert ($1), but the rollback breaker has been open since $since ($reason), so the box stays up on it. A person decides: deploy a fix, or reboot to go back to $(basename "$(confirmed)"), after which ${booted##*/} isn't tried again until \`sudo nixhost-boot retry\`. \`sudo nixhost-breaker reset\` turns automatic reverts back on."
 }
 
 # trial_boot: whether GRUB booted this system as a trial, from the flag its
@@ -142,7 +168,7 @@ pending_trial() {
 # reboot until another system is deployed or an admin runs retry.
 held_outcome() {
   case "$1" in
-  failed-check | deadline | hung | unconfirmed | not-armed) return 0 ;;
+  failed-check | deadline | hung | unconfirmed | not-armed | held) return 0 ;;
   *) return 1 ;;
   esac
 }
@@ -379,8 +405,8 @@ restore_panic_sysctls() {
 }
 
 # status_set <key> <value>: this boot's status in RUN/status.json: bootId,
-# system, confirmed, supported, trial (none, pending, confirmed or reverted)
-# and check (pending, ok or failed).
+# system, confirmed, supported, trial (none, pending, confirmed, reverted
+# or held) and check (pending, ok or failed).
 status_set() {
   local file=$RUN/status.json
   mkdir -p "$RUN"
@@ -413,7 +439,7 @@ metrics() {
     check=$(jq -r .check "$status")
   fi
   write_metrics nixhost_boot <<METRICS
-# HELP nixhost_boot_status This boot: its ID, its trial (none, pending, confirmed or reverted) and its boot check (pending, ok or failed).
+# HELP nixhost_boot_status This boot: its ID, its trial (none, pending, confirmed, reverted or held) and its boot check (pending, ok or failed).
 # TYPE nixhost_boot_status gauge
 nixhost_boot_status{boot_id="$boot_id",trial="$trial_state",check="$check"} 1
 # HELP nixhost_boot_trial Whether this boot is a trial of a new system that hasn't passed its boot check yet.
@@ -450,7 +476,10 @@ report() {
       notify_admins warning "Trial boot reverted" "The trial boot of ${system##*/} ended $outcome: $(trial .detail). The box is back on ${confirmed##*/}. Reboots for that system are held: deploy a fix, or run \`sudo nixhost-boot retry\` to try it once more at the next reboot."
       ;;
     not-armed)
-      notify_admins warning "Trial boot not armed" "A shutdown couldn't set up the trial boot of ${system##*/}: $(trial .detail). The box stayed on ${confirmed##*/}, and its reboot is held: fix /boot (journalctl -u nixhost-boot), then run \`sudo nixhost-boot retry\`."
+      notify_admins warning "Trial boot not armed" "A shutdown couldn't set up the trial boot of ${system##*/}: $(trial .detail). The box stayed on ${confirmed##*/}, and its reboot is held: fix the cause (journalctl -u nixhost-boot), then run \`sudo nixhost-boot retry\`."
+      ;;
+    skipped)
+      notify_admins info "Booted without a trial" "${system##*/} booted without a trial ($(trial .detail)), as the confirmed system: a reboot doesn't go back to $(basename "$(trial .confirmed)")."
       ;;
     bypassed)
       notify_admins info "Booted outside a trial" "GRUB booted ${system##*/} from its own menu entry, not as a trial: $(trial .detail). Its boot check decides whether it becomes the confirmed system."
@@ -486,6 +515,13 @@ start() {
   # trial passed.
   if [ "$(trial .outcome)" = confirmed ] && [ -d "$system" ] && [ "$system" != "$(confirmed)" ]; then
     echo "finishing the interrupted confirm of $system"
+    set_confirmed "$system"
+  fi
+  # A skipped trial interrupted between its record and the confirmed link
+  # (stop makes it GRUB's default first).
+  if [ "$(trial .outcome)" = skipped ] && [ -d "$system" ] && [ "$system" != "$(confirmed)" ] &&
+    [ "$(readnum "$STATE/confirmed_at")" -lt "$(trial .armedAt)" ]; then
+    echo "finishing the interrupted skip of $system's trial"
     set_confirmed "$system"
   fi
   # GRUB booted a trial whose arming the shutdown didn't finish recording.
@@ -542,8 +578,21 @@ arm() {
   write_boot_cfg "$(confirmed)" "$1" && env_set "${1##*/}"
 }
 
+# pre_arm <system> <confirmed>: the preArm hook, if any, for at most 120 s.
+# Its exit status: 0 arms the trial, 10 boots the system without one, and
+# anything else arms nothing.
+pre_arm() {
+  local hook
+  hook=$(setting .preArm)
+  if [ -z "$hook" ]; then
+    return 0
+  fi
+  echo "running the pre-arm hook for $1"
+  timeout --kill-after=10 120 "$hook" "$1" "$2"
+}
+
 stop() {
-  local target confirmed err
+  local target confirmed err hook skip guarded
   # Only a shutdown arms a trial, not a stop by hand or by a switch.
   if [ "$(systemctl is-system-running 2>/dev/null || true)" != stopping ]; then
     echo "not shutting down: no trial to arm"
@@ -573,7 +622,35 @@ stop() {
   # Recorded as not armed until it is, so an arming that fails or is cut off
   # holds the reboot instead of rebooting into the confirmed system again.
   record "$target" not-armed "the shutdown was cut off while arming it"
-  if ! err=$(arm "$target" 2>&1); then
+  hook=0
+  pre_arm "$target" "$confirmed" || hook=$?
+  case $hook in
+  0 | 10) err="" ;;
+  124 | 137) err="the pre-arm hook timed out after 120 s" ;;
+  *) err="the pre-arm hook exited $hook" ;;
+  esac
+  # The hook's 10, or a rollback guard that differs, boots it without a
+  # trial, as the confirmed system: GRUB's default first, so a reset after
+  # this boots it too.
+  skip=""
+  if [ -z "$err" ]; then
+    if [ "$hook" = 10 ]; then
+      skip="the pre-arm hook skipped its trial"
+    fi
+    if guarded=$(guard_differs "$target" "$confirmed"); then
+      skip="${skip:+$skip; }the rollback guard differs: $guarded"
+    fi
+  fi
+  if [ -n "$skip" ]; then
+    if err=$(write_boot_cfg "$target" 2>&1); then
+      record "$target" skipped "$skip"
+      set_confirmed "$target"
+      echo "booting $target without a trial ($skip): it's the confirmed system now"
+      return
+    fi
+    err="couldn't make it GRUB's default without a trial: $(tail -n1 <<<"$err")"
+  fi
+  if [ -n "$err" ] || ! err=$(arm "$target" 2>&1); then
     err=$(tail -n1 <<<"$err")
     echo "couldn't arm a trial boot of $target: $err"
     record "$target" not-armed "${err:-arming it failed}"
@@ -592,7 +669,8 @@ confirm() {
   current=$(readlink -f /run/current-system)
   status_set check '"ok"'
   if trial_boot && [ "$(trial .system)" = "$booted" ]; then
-    if [ "$(trial .outcome)" != pending ]; then
+    # A trial held at the deadline whose check passes later is confirmed.
+    if [ "$(trial .outcome)" != pending ] && [ "$(trial .outcome)" != held ]; then
       echo "this boot's trial already ended ($(trial .outcome)): not confirming it"
     elif [ "$current" != "$booted" ]; then
       echo "not confirming: the running system, $current, isn't the trial"
@@ -626,6 +704,10 @@ revert() {
   status_set check '"failed"'
   if pending_trial; then
     failed=$(journalctl -b -u nixhost-boot-check.service -o cat | sed -n 's/^checks failed after boot: *//p' | tail -n1 || true)
+    if breaker_open; then
+      hold "its boot check failed${failed:+ ($failed)}"
+      return
+    fi
     resolve failed-check "its boot check failed${failed:+ ($failed)}"
     status_set trial '"reverted"'
     metrics
@@ -643,6 +725,10 @@ deadline() {
   fi
   if check_passed; then
     echo "the boot check passed: nixhost-boot-confirm confirms the trial"
+    return
+  fi
+  if breaker_open; then
+    hold "its boot check hadn't passed $(setting .deadline) s after boot"
     return
   fi
   resolve deadline "its boot check hadn't passed $(setting .deadline) s after boot"

@@ -69,7 +69,9 @@
           }
           ./modules/deploy
           ./modules/fingerprint.nix
+          ./modules/rollout/options.nix
         ];
+        node-report = module "node-report" [ ./modules/rollout/node-report.nix ];
         reboot-detect = module "reboot-detect" [ ./modules/updates/reboot-detect.nix ];
         reboot-interactive = module "reboot-interactive" [
           self.nixosModules.reboot-detect
@@ -91,11 +93,16 @@
           self.nixosModules.users
           self.nixosModules.secrets
           self.nixosModules.deploy
+          self.nixosModules.node-report
           self.nixosModules.reboot-detect
           self.nixosModules.monitoring
           self.nixosModules.banlist
         ];
       };
+
+      # rolloutPlan: a fleet's staged rollout from its hosts' configurations,
+      # which the promoter (rollout/promoter, host-promote) follows.
+      lib.rolloutPlan = import ./lib/rollout-plan.nix { inherit lib; };
 
       # The scripts behind the reusable workflows, for host repos' CI (ci/).
       packages.${system} = import ./ci { inherit pkgs lib; };

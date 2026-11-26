@@ -1,9 +1,12 @@
 # The post-deploy health check, with its real sshd, route, firewall, DNS and
 # git checks: a healthy deployment becomes the last good system; a deployment
-# that breaks SSH is rolled back to it; when the checks fail on both, the
-# deployed system stays; an outage outside the box that ends during the
-# rollback doesn't undo the deploy, but a deploy that breaks DNS is rolled
-# back. The admins hear about each through Discord-style webhooks.
+# that breaks SSH is rolled back to it, which opens the rollback breaker; while
+# it's open a failing deploy stays, until `nixhost-breaker reset`; a deploy
+# across a rollback guard change isn't rolled back, and a passing deploy
+# closes the breaker; when the checks fail on both, the deployed system
+# stays; an outage outside the box that ends during the rollback doesn't
+# undo the deploy, but a deploy that breaks DNS is rolled back. The admins
+# hear about each through Discord-style webhooks.
 { self, lib, ... }:
 {
   name = "health-check";
@@ -48,6 +51,8 @@
           url = "http://127.0.0.1:8000/api/webhooks/3/wrong";
         }
       ];
+      ethpandaops.rollback.guard.k3s = "1.33";
+      specialisation.guarded.configuration.ethpandaops.rollback.guard.k3s = lib.mkForce "1.34";
       specialisation.broken.configuration.services.openssh.enable = lib.mkForce false;
       specialisation.other.configuration.environment.etc."health-check-test".text = "other";
       specialisation.nodns.configuration.networking.hosts."192.0.2.1" = lib.mkForce [ ];
@@ -73,9 +78,19 @@
           machine.wait_until_succeeds("systemctl show -p ActiveState --value nixhost-health-check | grep -qxE 'inactive|failed'", timeout=120)
           assert machine.succeed("systemctl show -p Result --value nixhost-health-check").strip() == result
 
+      def breaker():
+          return json.loads(machine.succeed("cat /var/lib/nixhost-deploy/breaker.json"))
+
+      def embeds(title):
+          # The Discord embeds sent to the first webhook with this title.
+          lines = [line.split(" ", 1) for line in machine.succeed("cat /var/lib/notify-sink.log").splitlines()]
+          return [e for p, body in lines if p == "/api/webhooks/1/native" for e in json.loads(body)["embeds"] if e["title"] == title]
+
       machine.wait_for_unit("multi-user.target")
       machine.wait_for_unit("sshd.service")
       machine.wait_for_unit("notify-sink.service")
+      # Every minute nixhost-checks rewrites the status file; only the deploy runs here do.
+      machine.succeed("systemctl stop nixhost-checks.timer nixhost-checks.service")
       machine.succeed(
           "git init -q -b deploy /tmp/work",
           "git -C /tmp/work -c user.name=t -c user.email=t@example.org commit -q --allow-empty -m init",
@@ -95,6 +110,10 @@
           assert machine.succeed("readlink /var/lib/nixhost-deploy/last-good").strip() == good
           machine.succeed("test -L /nix/var/nix/gcroots/nixhost-last-good")
           machine.succeed("grep -qx 'nixhost_healthcheck_ok 1' /var/lib/node-exporter/nixhost_healthcheck.prom")
+          status = json.loads(machine.succeed("cat /run/nixhost/checks/status.json"))
+          assert status["phase"] == "deploy" and status["health"] == "ok" and status["system"] == good, status
+          assert sorted(status["checks"]) == ["default-route", "dns", "extra", "firewall", "git-remote", "sshd"], status
+          assert status["checks"]["dns"]["outside"] and not status["checks"]["sshd"]["outside"], status
 
       with subtest("a deployment that breaks SSH is rolled back"):
           machine.succeed(f"{good}/specialisation/broken/bin/switch-to-configuration test")
@@ -107,7 +126,7 @@
           assert machine.succeed("readlink -f /run/current-system").strip() == good
           machine.succeed("grep -qx 'nixhost_healthcheck_rollbacks_total 1' /var/lib/node-exporter/nixhost_healthcheck.prom")
           machine.succeed("grep -qx 'nixhost_healthcheck_ok 1' /var/lib/node-exporter/nixhost_healthcheck.prom")
-          machine.succeed("grep -q 'sshd-not-listening-on-22) after deploying 222222222222; rolling back' /var/lib/notify-sink.log")
+          machine.succeed("grep -q 'sshd) after deploying 222222222222; rolling back' /var/lib/notify-sink.log")
           machine.succeed("grep -q 'checks pass again' /var/lib/notify-sink.log")
 
       with subtest("Discord gets an embed, or a Slack attachment on /slack, under the host's name; a rejection is logged with its reason"):
@@ -120,7 +139,7 @@
           assert native["username"] == "machine", native
           assert native["allowed_mentions"] == {"parse": []}, native
           embed = native["embeds"][0]
-          assert embed["description"].startswith("Health check failed (sshd-not-listening-on-22) after deploying 222222222222; rolling back to /nix/store/"), embed
+          assert embed["description"].startswith("Health check failed (sshd) after deploying 222222222222; rolling back to /nix/store/"), embed
           assert embed["color"] == 15770634, embed
           assert {"name": "Host", "value": "machine", "inline": True} in embed["fields"], embed
           assert {"name": "Severity", "value": "warning", "inline": True} in embed["fields"], embed
@@ -131,6 +150,64 @@
           assert {"title": "Host", "value": "machine", "short": True} in attachment["fields"], attachment
           machine.fail("journalctl -t nixhost-notify | grep -q 'delivery to a discord target failed'")
           machine.succeed("journalctl -t nixhost-notify | grep -q 'delivery to a webhook target failed: .*Cannot send an empty message'")
+
+      with subtest("the kept rollback opened the rollback breaker"):
+          b = breaker()
+          assert b["open"] is True and b["reason"] == "rolled back 222222222222", b
+          machine.succeed("grep -qx 'nixhost_rollback_breaker_open 1' /var/lib/node-exporter/nixhost_breaker.prom")
+          machine.succeed("grep -qx 'nixhost_rollback_breaker_blocked_total 0' /var/lib/node-exporter/nixhost_breaker.prom")
+          assert "The rollback breaker is open" in machine.succeed("nixhost-breaker status")
+
+      with subtest("while it's open, a failing deploy isn't rolled back: it stays, and the admins hear"):
+          broken = machine.succeed(f"readlink -f {good}/specialisation/broken").strip()
+          machine.succeed(f"{broken}/bin/switch-to-configuration test")
+          deployed("done", "7777777777777777")
+          machine.wait_until_succeeds("grep -q 'after deploying 777777777777; not rolling back: the rollback breaker has been open since' /var/lib/notify-sink.log", timeout=120)
+          check_finished("exit-code")
+          assert machine.succeed("readlink -f /run/current-system").strip() == broken
+          [embed] = embeds("Health check failed: not rolling back")
+          assert {"name": "Severity", "value": "critical", "inline": True} in embed["fields"], embed
+          assert "(rolled back 222222222222). Reset it with `sudo nixhost-breaker reset`" in embed["description"], embed
+          machine.succeed("grep -qx 'nixhost_rollback_breaker_blocked_total 1' /var/lib/node-exporter/nixhost_breaker.prom")
+          machine.succeed("grep -qx 'nixhost_healthcheck_ok 0' /var/lib/node-exporter/nixhost_healthcheck.prom")
+          machine.succeed("grep -qx 'nixhost_healthcheck_rollbacks_total 1' /var/lib/node-exporter/nixhost_healthcheck.prom")
+          assert json.loads(machine.succeed("cat /run/nixhost/checks/status.json"))["health"] == "failed"
+          assert breaker()["open"] is True
+
+      with subtest("nixhost-breaker reset closes it"):
+          machine.succeed(f"{good}/bin/switch-to-configuration test")
+          machine.wait_for_unit("sshd.service")
+          machine.succeed("nixhost-breaker reset")
+          b = breaker()
+          assert b["open"] is False and b["reason"] == "reset by root", b
+          machine.succeed("grep -qx 'nixhost_rollback_breaker_open 0' /var/lib/node-exporter/nixhost_breaker.prom")
+          machine.wait_until_succeeds("grep -q 'root reset the rollback breaker' /var/lib/notify-sink.log")
+          assert "The rollback breaker is closed" in machine.succeed("nixhost-breaker status")
+
+      with subtest("a failing deploy across a rollback guard change isn't rolled back, and opens the breaker"):
+          guarded = machine.succeed(f"readlink -f {good}/specialisation/guarded").strip()
+          machine.succeed(f"{guarded}/bin/switch-to-configuration test", "touch /run/fail-health")
+          assert json.loads(machine.succeed("cat /etc/nixhost/rollback-guard.json")) == {"k3s": "1.34"}
+          deployed("done", "8888888888888888")
+          machine.wait_until_succeeds("grep -q 'after deploying 888888888888; not rolling back, the deploy changed k3s, which an automatic rollback can.t cross. A person decides.' /var/lib/notify-sink.log", timeout=120)
+          check_finished("exit-code")
+          assert machine.succeed("readlink -f /run/current-system").strip() == guarded
+          b = breaker()
+          assert b["open"] is True and b["reason"] == "guard: k3s" and b["system"] == guarded, b
+          machine.succeed("grep -qx 'nixhost_rollback_breaker_blocked_total 2' /var/lib/node-exporter/nixhost_breaker.prom")
+          machine.succeed("grep -qx 'nixhost_healthcheck_rollbacks_total 1' /var/lib/node-exporter/nixhost_healthcheck.prom")
+          machine.succeed("rm /run/fail-health")
+
+      with subtest("a deploy that passes its health checks closes the breaker"):
+          machine.succeed(f"{good}/bin/switch-to-configuration test")
+          machine.wait_for_unit("sshd.service")
+          deployed("done", "9999999999999999")
+          machine.wait_until_succeeds("grep -q 'The rollback breaker closed: 999999999999 passed its health checks' /var/lib/notify-sink.log", timeout=120)
+          check_finished()
+          b = breaker()
+          assert b["open"] is False and b["reason"] == "999999999999 passed its health checks", b
+          machine.succeed("grep -qx 'nixhost_rollback_breaker_open 0' /var/lib/node-exporter/nixhost_breaker.prom")
+          assert machine.succeed("readlink /var/lib/nixhost-deploy/last-good").strip() == good
 
       with subtest("when the checks also fail on the older system, the deployed system stays"):
           other = machine.succeed(f"readlink -f {good}/specialisation/other").strip()
@@ -159,7 +236,7 @@
           nodns = machine.succeed(f"readlink -f {good}/specialisation/nodns").strip()
           machine.succeed(f"{nodns}/bin/switch-to-configuration test")
           deployed("done", "5555555555555555")
-          machine.wait_until_succeeds("grep -q 'dns-github.com) after deploying 555555555555; rolling back' /var/lib/notify-sink.log", timeout=120)
+          machine.wait_until_succeeds("grep -q 'dns) after deploying 555555555555; rolling back' /var/lib/notify-sink.log", timeout=120)
           machine.wait_until_succeeds("grep -qx 'nixhost_healthcheck_rollbacks_total 2' /var/lib/node-exporter/nixhost_healthcheck.prom", timeout=240)
           check_finished()
           assert machine.succeed("readlink -f /run/current-system").strip() == other
@@ -168,7 +245,7 @@
       with subtest("a firewall without its rules fails the check"):
           machine.succeed("iptables -w -D INPUT -j nixos-fw")
           deployed("done", "6666666666666666")
-          machine.wait_until_succeeds("grep -q 'firewall-off) after deploying 666666666666' /var/lib/notify-sink.log", timeout=120)
+          machine.wait_until_succeeds("grep -q 'firewall) after deploying 666666666666' /var/lib/notify-sink.log", timeout=120)
           check_finished("exit-code")
           machine.succeed("systemctl reload firewall", "iptables -w -C INPUT -j nixos-fw")
 

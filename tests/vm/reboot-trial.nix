@@ -17,9 +17,10 @@
 # - on a trial, an unreachable git remote is retried past the health
 #   check's timeout until near the deadline, and the trial confirms;
 # - a system that fails its boot check reboots into the confirmed one
-#   through logind (PrepareForShutdown); its reboot is held (no kured
-#   sentinel, no reboot in the window or at the deadline) and another
-#   reboot doesn't try it again; a block inhibitor doesn't stop a revert;
+#   through logind (PrepareForShutdown), which opens the rollback breaker;
+#   its reboot is held (no kured sentinel, no reboot in the window or at the
+#   deadline) and another reboot doesn't try it again; a block inhibitor
+#   doesn't stop a revert;
 # - a power loss while arming, or a full ESP at shutdown, leaves the trial
 #   not armed, uncounted and held, with nothing partial on the ESP;
 # - a kernel that stops in the initrd is reset by the watchdog.
@@ -30,7 +31,12 @@
 # md12, md10 (BIOS, /boot on md RAID1 with metadata 1.2 and ext3, or 1.0
 #   and ext4): with 1.2 trials are off, the admins hear once and a reboot
 #   boots the deployed system directly; with 1.0 a trial confirms and a
-#   failing one reverts.
+#   failing one reverts, which opens the rollback breaker, so the next
+#   failing one stays up, held; a pre-arm hook that exits 10 boots the
+#   next system without a trial, as the confirmed one, and one that exits 1
+#   arms nothing and holds the reboot; a system whose rollback guard
+#   differs boots without a trial.
+# Every scenario runs a pre-arm hook, which arms the trial when it exits 0.
 {
   self,
   pkgs,
@@ -218,6 +224,9 @@ let
     md10 = {
       good.configuration.boot.kernelParams = [ "nixhost.test=good" ];
       unhealthy.configuration = unhealthy;
+      skip.configuration.boot.kernelParams = [ "nixhost.test=skip" ];
+      # A value no rollback may cross, as for a k3s minor upgrade.
+      guarded.configuration.ethpandaops.rollback.guard.k3s = "1.34";
     };
   };
 
@@ -328,14 +337,17 @@ let
           assert boot() == slowremote
           machine.fail("grep -q nixhost.trial /proc/cmdline")
           t = trial()
-          assert t["system"] == unhealthy and t["outcome"] == "failed-check" and "extra-script" in t["detail"], t
+          assert t["system"] == unhealthy and t["outcome"] == "failed-check" and "(extra)" in t["detail"], t
           machine.succeed(f"journalctl -b -1 -k -o cat | grep -q 'Command line:.*nixhost.trial={name(unhealthy)}'")
-          machine.succeed("journalctl -b -1 -o cat -u nixhost-boot-check | grep -q 'checks failed after boot: extra-script'")
+          machine.succeed("journalctl -b -1 -o cat -u nixhost-boot-check | grep -qx 'checks failed after boot: extra'")
           # Through logind, so the kubelet's graceful shutdown would run.
           machine.succeed("journalctl -b -1 -o cat -u nixhost-test-shutdown-signal | grep -A1 'member=PrepareForShutdown' | grep -q 'boolean true'")
           machine.fail("journalctl -b -1 -o cat -u nixhost-boot-revert | grep -q 'logind refused'")
           assert metric("nixhost_boot_reverts_total") == "1"
           machine.wait_until_succeeds(f"journalctl -t nixhost-notify | grep -q 'Trial boot reverted: The trial boot of {name(unhealthy)} ended failed-check'")
+          # The revert opened the rollback breaker.
+          assert breaker()["open"] is True and breaker()["reason"] == f"trial of {name(unhealthy)} reverted", breaker()
+          assert metric("nixhost_rollback_breaker_open") == "1"
 
       with subtest("its reboot is held: no sentinel for kured, no reboot in the window or at the deadline"):
           machine.succeed("systemctl stop nixhost-reboot-policy.timer", "systemctl start nixhost-reboot-detect.service")
@@ -361,6 +373,8 @@ let
           machine.succeed("nixhost-boot retry", "test -e /run/reboot-required")
 
       with subtest("a block inhibitor doesn't stop a revert: logind refuses, so it starts reboot.target itself"):
+          # With the rollback breaker open, a failing trial would stay up.
+          machine.succeed("nixhost-breaker reset")
           blocked = deploy("blocked")
           reboot()
           machine.start()
@@ -454,6 +468,10 @@ let
           machine.succeed("nixhost-boot retry")
 
       with subtest("a trial whose boot check never finishes is reset by the stage-2 deadline, through logind"):
+          # The hung trials above opened the rollback breaker (a hang still
+          # reverts); with it open the deadline would leave the trial up.
+          assert breaker()["open"] is True and breaker()["reason"] == f"trial of {name(activationhang)} reverted", breaker()
+          machine.succeed("nixhost-breaker reset")
           reboot()
           machine.start()
           took = wait_reset(within=${toString deadline} + 120)
@@ -513,6 +531,68 @@ let
           t = trial()
           assert t["system"] == unhealthy and t["outcome"] == "failed-check", t
           assert metric("nixhost_boot_reverts_total") == "1"
+          assert breaker()["open"] is True
+
+      with subtest("with the rollback breaker open, a failing trial stays up, held, and the admins hear"):
+          machine.succeed("nixhost-boot retry")
+          reboot()
+          machine.start()
+          machine.wait_for_unit("multi-user.target")
+          machine.wait_until_succeeds("[ $(systemctl show -p ExecMainExitTimestampMonotonic --value nixhost-boot-revert) != 0 ]", timeout=300)
+          assert sh("readlink -f /run/booted-system") == unhealthy
+          machine.succeed(f"grep -q 'nixhost.trial={name(unhealthy)}' /proc/cmdline")
+          t = trial()
+          assert t["system"] == unhealthy and t["outcome"] == "held" and "rollback breaker is open" in t["detail"], t
+          s = status()
+          assert s["trial"] == "held" and s["check"] == "failed", s
+          assert metric("nixhost_boot_reverts_total") == "1"
+          assert metric("nixhost_rollback_breaker_blocked_total") == "1"
+          machine.wait_until_succeeds(f"journalctl -t nixhost-notify | grep -q 'critical: Trial boot held: The trial boot of {name(unhealthy)} would revert'")
+          # The stage-2 deadline doesn't reboot a held trial either.
+          machine.succeed("systemctl start nixhost-boot-deadline.service")
+          assert trial()["outcome"] == "held"
+
+      # The pre-arm hook (preArm) exits with the code in this file.
+      with subtest("a pre-arm hook that exits 10 boots the next system without a trial, as the confirmed one"):
+          skip = deploy("skip")
+          machine.succeed("echo 10 > /var/lib/nixhost-test-pre-arm")
+          reboot()
+          assert boot() == skip
+          machine.fail("grep -q nixhost.trial /proc/cmdline")
+          machine.succeed(f"grep -q 'nixhost.confirmed={name(skip)}' /proc/cmdline")
+          assert sh("cat /var/lib/nixhost-test-pre-arm.args") == f"{skip} {good}"
+          t = trial()
+          assert t["system"] == skip and t["confirmed"] == good and t["outcome"] == "skipped" and t["detail"] == "the pre-arm hook skipped its trial", t
+          assert sh("readlink -f /var/lib/nixhost-boot/confirmed") == skip
+          s = status()
+          assert s["trial"] == "none" and s["check"] == "ok", s
+          assert metric("nixhost_boot_reverts_total") == "1"
+          machine.wait_until_succeeds(f"journalctl -t nixhost-notify | grep -q 'Booted without a trial: {name(skip)} booted without a trial'")
+          machine.succeed("systemctl start nixhost-reboot-detect.service", "test ! -e /run/reboot-required")
+
+      with subtest("a pre-arm hook that fails arms nothing: the confirmed system boots, and the reboot is held"):
+          again = deploy("good")
+          machine.succeed("echo 1 > /var/lib/nixhost-test-pre-arm")
+          reboot()
+          assert boot() == skip
+          machine.fail("grep -q nixhost.trial /proc/cmdline")
+          t = trial()
+          assert t["system"] == again and t["outcome"] == "not-armed" and t["detail"] == "the pre-arm hook exited 1", t
+          assert metric("nixhost_boot_reverts_total") == "1"
+          machine.succeed("systemctl start nixhost-reboot-detect.service", "test ! -e /run/reboot-required")
+          assert json.loads(sh("cat /run/nixhost/reboot/required.json"))["held"] == "trial-not-armed"
+          machine.wait_until_succeeds(f"journalctl -t nixhost-notify | grep -q 'Trial boot not armed: A shutdown couldn.t set up the trial boot of {name(again)}: the pre-arm hook exited 1'")
+
+      with subtest("a system whose rollback guard differs boots without a trial, as the confirmed one"):
+          guarded = deploy("guarded")
+          machine.succeed("echo 0 > /var/lib/nixhost-test-pre-arm")
+          reboot()
+          assert boot() == guarded
+          machine.fail("grep -q nixhost.trial /proc/cmdline")
+          assert sh("cat /var/lib/nixhost-test-pre-arm.args") == f"{guarded} {skip}"
+          t = trial()
+          assert t["system"] == guarded and t["outcome"] == "skipped" and t["detail"] == "the rollback guard differs: k3s", t
+          assert sh("readlink -f /var/lib/nixhost-boot/confirmed") == guarded
     '';
   };
 in
@@ -568,6 +648,12 @@ diskoLib.testLib.makeDiskoTest {
         enable = true;
         inherit deadline;
         watchdogModules = [ "i6300esb" ];
+        # Exits with the code in /var/lib/nixhost-test-pre-arm (0 without
+        # it), and records what it was given.
+        preArm = ''
+          echo "$1 $2" >/var/lib/nixhost-test-pre-arm.args
+          exit "$(cat /var/lib/nixhost-test-pre-arm 2>/dev/null || echo 0)"
+        '';
       };
       # Reset soon after the watchdog stops being fed.
       boot.initrd.systemd.settings.Manager.RuntimeWatchdogSec = "10s";
@@ -624,6 +710,9 @@ diskoLib.testLib.makeDiskoTest {
 
     def status():
         return json.loads(sh("cat /run/nixhost/boot/status.json"))
+
+    def breaker():
+        return json.loads(sh("cat /var/lib/nixhost-deploy/breaker.json"))
 
     def boot_id():
         return sh("cat /proc/sys/kernel/random/boot_id")

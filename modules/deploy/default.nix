@@ -1,8 +1,12 @@
 # Pull-based deploys with comin (comin.nixosModules.comin, imported by
 # nixosModules.deploy): the box polls a branch of a git repository and
-# switches to each new commit. After every deployment a health check runs
-# and rolls back to the last good system if it fails. Set
-# allowedSignersFile to deploy only commits signed by listed keys.
+# switches to each new commit. After every deployment the health checks
+# (ethpandaops.checks, ../checks) run and roll back to the last good system
+# if one fails. This module defines the built-in ones from healthCheck:
+# sshd, default-route, firewall, dns and git-remote (outside) and extra; a
+# fleet can disable or override each. Automatic rollbacks stop at the
+# rollback breaker (breaker.nix) and never cross ethpandaops.rollback.guard.
+# Set allowedSignersFile to deploy only commits signed by listed keys.
 {
   config,
   lib,
@@ -34,31 +38,12 @@ let
         ;
       # Such as 26.05.20261121.94c3211, with the nixpkgs commit date.
       nixosVersion = config.system.nixos.version;
-      healthCheck = {
-        inherit (hc)
-          enable
-          timeout
-          dnsName
-          checkDefaultRoute
-          checkRemote
-          ;
-        sshPort = builtins.head config.services.openssh.ports;
-        # The NixOS firewall's rules, which a failed reload takes out.
-        firewall =
-          if !fw.enable then
-            null
-          else
-            {
-              kind = if config.networking.nftables.enable then "nftables" else "iptables";
-              ipv6 = config.networking.enableIPv6;
-            };
-        extraScript = pkgs.writeShellScript "nixhost-health-check-extra" hc.extraScript;
-      };
+      healthCheck = { inherit (hc) enable; };
     }
   );
 
   script =
-    name: file: runtimeInputs:
+    name: text: runtimeInputs:
     pkgs.writeShellApplication {
       inherit name runtimeInputs;
       text = ''
@@ -66,7 +51,7 @@ let
         NOTIFY=${lib.getExe config.ethpandaops.notify.package}
         ${config.ethpandaops.lib.shell}
         ${builtins.readFile ./common.sh}
-        ${builtins.readFile file}
+        ${text}
       '';
     };
 
@@ -79,23 +64,59 @@ let
     util-linux
   ];
 
-  postDeploy = script "nixhost-post-deploy" ./post-deploy.sh common;
-  healthCheck = script "nixhost-health-check" ./health-check.sh (
-    common
-    ++ (with pkgs; [
-      iproute2
-      getent
-      nix
-    ])
-    ++ lib.optional fw.enable (if config.networking.nftables.enable then pkgs.nftables else fw.package)
+  postDeploy = script "nixhost-post-deploy" (builtins.readFile ./post-deploy.sh) common;
+  healthCheck =
+    script "nixhost-health-check"
+      (
+        config.ethpandaops.lib.checks + config.ethpandaops.lib.breaker + builtins.readFile ./health-check.sh
+      )
+      (
+        common
+        ++ [
+          pkgs.gawk
+          pkgs.nix
+        ]
+      );
+  upstreamCheck = script "nixhost-deploy-lag" (builtins.readFile ./upstream-check.sh) (
+    common ++ [ pkgs.gawk ]
   );
-  upstreamCheck = script "nixhost-deploy-lag" ./upstream-check.sh (common ++ [ pkgs.gawk ]);
+
+  # The built-in health checks' commands.
+  ip = "${pkgs.iproute2}/bin/ip";
+  sshPort = toString (builtins.head config.services.openssh.ports);
+  gitRemote = script "nixhost-check-deploy-remote" ''
+    branch=$(setting .branch)
+    if ! err=$(git_remote --exit-code "refs/heads/$branch" 2>&1 >/dev/null); then
+      echo "can't read the deploy branch $branch from the remote: $(head -n1 <<<"''${err:-no such branch}")"
+      exit 1
+    fi
+    echo "the deploy branch $branch is on the remote"
+  '' common;
 in
 {
   imports = [
+    ./breaker.nix
+    ../checks
     ../metrics.nix
     ../notify.nix
   ];
+
+  options.ethpandaops.rollback.guard = lib.mkOption {
+    type = lib.types.attrsOf lib.types.str;
+    default = { };
+    example = {
+      k3s = "1.34";
+      datastore = "etcd";
+    };
+    description = ''
+      Values no automatic rollback may cross, such as a k3s minor version or
+      a datastore setting. Each system carries its own, at
+      /etc/nixhost/rollback-guard.json. A deploy whose health check fails
+      isn't rolled back to a system whose guard differs: the rollback breaker
+      trips and a person decides. A reboot into a system whose guard
+      differs from the confirmed one's boots it without a trial.
+    '';
+  };
 
   options.ethpandaops.deploy = {
     enable = lib.mkOption {
@@ -168,27 +189,31 @@ in
       timeout = lib.mkOption {
         type = lib.types.ints.positive;
         default = 180;
-        description = "Seconds to keep retrying the checks before rolling back.";
+        description = "Seconds to keep retrying a failing health check before rolling back: the default timeout of every health check (ethpandaops.checks).";
       };
       dnsName = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = "github.com";
-        description = "A name that must resolve. Null skips the DNS check.";
+        description = "A name that must resolve (the dns check). Null skips it.";
       };
       checkDefaultRoute = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Require an IPv4 or IPv6 default route.";
+        description = "Require an IPv4 or IPv6 default route (the default-route check).";
       };
       checkRemote = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Require `git ls-remote` of the repository to work with the deploy key.";
+        description = "Require `git ls-remote` of the repository to work with the deploy key (the git-remote check).";
       };
       extraScript = lib.mkOption {
         type = lib.types.lines;
         default = "";
-        description = "More bash run as a check; a non-zero exit means unhealthy.";
+        description = ''
+          More bash run as a check (the extra check); a non-zero exit means
+          unhealthy. It's shellchecked and runs with errexit, nounset and
+          pipefail. Prefer a named check in ethpandaops.checks.
+        '';
       };
     };
   };
@@ -228,6 +253,87 @@ in
         publicKey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=";
       };
     };
+
+    # The built-in health checks, from healthCheck. Each field is a default, so
+    # a fleet can turn one off (enable = false) or override it.
+    ethpandaops.checks = {
+      sshd.script = lib.mkDefault ''
+        if [ -z "$(${pkgs.iproute2}/bin/ss -Hltn 'sport = :${sshPort}')" ]; then
+          echo "nothing listens on TCP port ${sshPort}"
+          exit 1
+        fi
+        echo "sshd listens on TCP port ${sshPort}"
+      '';
+      default-route = {
+        enable = lib.mkDefault hc.checkDefaultRoute;
+        script = lib.mkDefault ''
+          if [ -z "$(${ip} -4 route show default)$(${ip} -6 route show default)" ]; then
+            echo "no IPv4 or IPv6 default route"
+            exit 1
+          fi
+          echo "there's a default route"
+        '';
+      };
+      # Whether the NixOS firewall's rules are in force. A reload that fails
+      # (say, a rule needs a kernel module that can't load any more) takes
+      # them out and leaves the box without a firewall.
+      firewall = {
+        enable = lib.mkDefault fw.enable;
+        script = lib.mkDefault (
+          if config.networking.nftables.enable then
+            ''
+              if ! ${pkgs.nftables}/bin/nft list table inet nixos-fw >/dev/null 2>&1; then
+                echo "the nixos-fw table isn't loaded"
+                exit 1
+              fi
+              echo "the nixos-fw table is loaded"
+            ''
+          else
+            ''
+              if ! ${fw.package}/bin/iptables -w -C INPUT -j nixos-fw 2>/dev/null; then
+                echo "INPUT doesn't jump to nixos-fw"
+                exit 1
+              fi
+              ${lib.optionalString config.networking.enableIPv6 ''
+                if ! ${fw.package}/bin/ip6tables -w -C INPUT -j nixos-fw 2>/dev/null; then
+                  echo "IPv6 INPUT doesn't jump to nixos-fw"
+                  exit 1
+                fi
+              ''}
+              echo "INPUT jumps to nixos-fw"
+            ''
+        );
+      };
+      # Cached answers from before an activation (resolved's cache, and its
+      # copy of /etc/hosts, reread at most every 2 s) could pass a system
+      # whose DNS is broken, so flush them and let it settle first.
+      dns = {
+        enable = lib.mkDefault (hc.dnsName != null);
+        outside = lib.mkDefault true;
+        script = lib.mkDefault ''
+          name=${lib.escapeShellArg hc.dnsName}
+          resolvectl flush-caches 2>/dev/null || true
+          sleep 3
+          if ! timeout 10 getent ahosts "$name" >/dev/null; then
+            echo "$name doesn't resolve"
+            exit 1
+          fi
+          echo "$name resolves"
+        '';
+      };
+      git-remote = {
+        enable = lib.mkDefault hc.checkRemote;
+        outside = lib.mkDefault true;
+        script = lib.mkDefault (lib.getExe gitRemote);
+      };
+      extra = {
+        enable = lib.mkDefault (hc.extraScript != "");
+        script = lib.mkDefault hc.extraScript;
+      };
+    };
+
+    environment.etc."nixhost/rollback-guard.json".text =
+      builtins.toJSON config.ethpandaops.rollback.guard;
 
     systemd.tmpfiles.rules = [ "d /var/lib/nixhost-deploy 0700 root root -" ];
 

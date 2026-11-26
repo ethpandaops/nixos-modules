@@ -19,7 +19,31 @@
     ];
     host.environment = "production";
     deploy.repository = "ssh://git@github.com/example/config.git";
-    reboot.trial.enable = true;
+    reboot.trial = {
+      enable = true;
+      preArm = ''
+        echo "about to boot $1 (confirmed: $2)"
+      '';
+    };
+    kubernetes = {
+      kubeconfig = "/var/lib/rancher/k3s/agent/kubelet.kubeconfig";
+      nodeName = config.networking.hostName;
+    };
+    checks = {
+      kubelet.http = "http://127.0.0.1:10248/healthz";
+      node.k8sNode = { };
+      ready = {
+        kind = "readiness";
+        k8sPod = {
+          namespace = "example";
+          selector = "app=example";
+        };
+      };
+      sshd-unit = {
+        kind = "readiness";
+        unit = "sshd.service";
+      };
+    };
     secrets.file = ./fixtures/secrets.yaml;
     monitoring.tailscale = {
       loginServer = "https://login.example.org";
