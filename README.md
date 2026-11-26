@@ -140,8 +140,9 @@ fleet, drains and reboots.
   ([lib/rollout-plan.nix](lib/rollout-plan.nix) lists every setting: change
   classes, soaks, promotion windows, kured's timings, the alert gate).
 - **When a host moves:** the target is on the source branch, its check
-  passed and every commit up to it is signed; the host's readiness checks
-  pass; on a Kubernetes fleet no PodDisruptionBudget blocks its drain, its
+  passed, and every commit up to it is signed by a listed key when the hosts
+  set `allowedSignersFile` (without it, write access is the trust line); the
+  host's readiness checks pass; on a Kubernetes fleet no PodDisruptionBudget blocks its drain, its
   workloads are ready, nothing in the cluster is worse than when the roll
   started, and no Grafana alert for it fires.
 - **When it's done:** it reports the target from its current boot (the
@@ -157,9 +158,10 @@ fleet, drains and reboots.
 - **Between environments:** a later one takes a commit only after the one
   before converged on it and its promote soak passed for the worst class
   across both; a commit that changes it more than the first saw waits for
-  `approve`. Only a range of signed `Urgency:` commits with evidence (a
+  `approve`. Only a range of `Urgency:` commits with evidence (a
   nixpkgs-only security fix, or a revert that restores the last converged
-  systems) shortens soaks or preempts a roll.
+  systems, and signed where the hosts require it) shortens soaks or preempts
+  a roll.
 
 ## Change
 

@@ -153,11 +153,11 @@ def check_passed(repo_name: str, workflow: str, sha: str, cache: dict) -> bool:
 
 
 def unsigned(repo: Repo, signers: str | None, commits: list[str]) -> list[str]:
-    """Commits not signed by an allowed key."""
-    if not commits:
+    """Commits not signed by an allowed key. A fleet whose hosts set no
+    allowedSignersFile deploys any commit on its branch, write access being
+    its trust line, so nothing counts as unsigned there."""
+    if not commits or not signers:
         return []
-    if not signers:
-        return commits
     with tempfile.NamedTemporaryFile("w", suffix=".allowed_signers", delete=False) as f:
         f.write(signers)
     try:
@@ -438,7 +438,7 @@ class Promoter:
         if not check_passed(self.repo_name, self.plan["checkWorkflow"], target, self.checks):
             return f"check didn't pass on {target[:12]}"
         bad = unsigned(self.repo, self.plan.get("allowedSigners"), self.repo.commits(branch, target))
-        if bad:
+        if bad:  # only when the fleet's hosts set allowedSignersFile
             return f"not signed by an allowed key: {', '.join(c[:12] for c in bad[:5])}"
         return ""
 
@@ -495,6 +495,8 @@ class Promoter:
     def step(self) -> int:
         if self.args.action != "run":
             return self.manual()
+        if not self.plan.get("allowedSigners"):
+            print(f"{self.env}: the hosts set no allowedSignersFile, so commits aren't checked for signatures")
         target = self.choose_target()
         if not target:
             print(f"{self.env}: nothing to roll")

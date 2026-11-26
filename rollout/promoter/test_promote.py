@@ -290,6 +290,18 @@ class Promote(Fleet):
         self.assertIn("not signed by an allowed key", out)
         self.assertEqual(self.remote_ref("deploy/s1"), self.c0)
 
+    def test_without_allowed_signers_an_unsigned_commit_moves(self):
+        # A fleet with no allowedSignersFile: write access is the trust line.
+        self.plan["allowedSigners"] = None
+        self.write("plan.json", self.plan)
+        c2 = self.commit("unsigned", {"README": "fleet 2\n"}, sign=False, push=True)
+        self.write("passed.json", [self.c0, self.c1, c2])
+        self.fps[c2] = {h: fp(toplevel="t2") for h in STAGING + PROD}
+        self.write("fingerprints.json", self.fps)
+        code, out = self.run_env("staging")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.remote_ref("deploy/s1"), c2)
+
     def test_the_class_comes_from_what_the_host_runs_not_its_branch(self):
         # s1's branch is at c1, but a trial revert left it running c0.
         self.git("push", "-q", "origin", f"{self.c1}:refs/heads/deploy/s1")
@@ -399,6 +411,11 @@ class Urgency(Fleet):
         self.commit("feature", {"README": "x\n"})
         c3 = self.commit("nixpkgs\n\nUrgency: security", {"flake.lock": self.lock("n1")})
         self.assertEqual(self.urgent(self.c1, c3), "")
+
+    def test_without_allowed_signers_an_unsigned_security_commit_is_urgent(self):
+        self.plan["allowedSigners"] = None
+        c2 = self.commit("nixpkgs\n\nUrgency: security", {"flake.lock": self.lock("n1")}, sign=False)
+        self.assertEqual(self.urgent(self.c1, c2), "security")
 
     def test_an_unsigned_urgent_commit_is_not_urgent(self):
         c2 = self.commit("nixpkgs\n\nUrgency: security", {"flake.lock": self.lock("n1")}, sign=False)
