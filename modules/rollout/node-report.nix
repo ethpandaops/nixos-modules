@@ -75,11 +75,16 @@ in
         ExecStart = lib.getExe report;
       };
     };
-    # Started and restarted with the kubelet's unit, so the first report comes
-    # 30 s after it starts (a node back from a reboot shows its revision
-    # soon), then every minute.
+    # Ordered after the kubelet's unit and restarted with it, so the first
+    # report comes 30 s after it starts (a node back from a reboot shows its
+    # revision soon), then every minute. timers.target wants it too: a live
+    # switch starts a new unit only through the targets it starts, and the
+    # kubelet's unit, still running, pulls in nothing.
     systemd.timers.nixhost-node-report = {
-      wantedBy = [ k8s.unit ];
+      wantedBy = [
+        "timers.target"
+        k8s.unit
+      ];
       after = [ k8s.unit ];
       partOf = [ k8s.unit ];
       timerConfig = {
