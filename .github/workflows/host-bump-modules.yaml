@@ -61,4 +61,4 @@ jobs:
           AFTER_TOKEN: ${{ secrets.after-token }}
         run: |
           nix run --inputs-from . nixos-modules#bump-modules -- \
-            --build "$BUILD" --min-age-hours "$MIN_AGE" --branch "$BRANCH" --mode "$MODE" --after "$AFTER"
+            --build "$BUILD" --min-age-hours "$MIN_AGE" --branch "$BRANCH" --mode "$MODE" ${AFTER:+--after "$AFTER"}
