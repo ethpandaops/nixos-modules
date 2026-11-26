@@ -697,7 +697,10 @@ diskoLib.testLib.makeDiskoTest {
         return new
 
     def reboot():
-        machine.execute("systemctl --no-block reboot")
+        # Without waiting for an answer: execute() otherwise reads the output
+        # and then asks the shell for the exit status, and the guest can be
+        # gone by then (BrokenPipeError).
+        machine.execute("systemctl --no-block reboot", check_output=False)
         machine.wait_for_shutdown()
 
     def wait_reset(within):
