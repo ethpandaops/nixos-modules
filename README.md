@@ -143,12 +143,14 @@ the hosts. So a host repo's self-hosted runners:
 - sit in a runner group only the host repos may use, with public
   repositories not allowed: a public repo's pull request from a fork runs
   anyone's code on every runner the repo can use.
-- never run a fork's pull request: callers skip one
-  (`if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`).
-- are x86_64-linux with systemd, curl, xz, python3 and passwordless sudo,
-  for install-nix-action's multi-user install with the build sandbox; on a
-  runner that has Nix, it leaves that Nix alone. No job here needs KVM or
-  Docker: the VM tests are this repo's own check.
+- never run a fork's pull request: keep "Allow forking" or "Run workflows
+  from fork pull requests" off in the host repos' settings. An `if` in the
+  caller can't do it, since a fork's pull request runs the workflow as the
+  fork changed it.
+- are x86_64-linux with git, plus systemd, curl, xz, python3 and
+  passwordless sudo for install-nix-action's multi-user install with the
+  build sandbox; on a runner that has Nix, it leaves that Nix alone. No job
+  here needs KVM or Docker: the VM tests are this repo's own check.
 
 Caching works as it does on GitHub-hosted runners: `actions/cache`
 (cve-scan's NVD feeds) is GitHub's service, and each job's Nix store starts

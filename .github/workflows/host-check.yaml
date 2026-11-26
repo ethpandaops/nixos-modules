@@ -7,9 +7,6 @@
 #   on: { push: {}, pull_request: {}, workflow_dispatch: {} }
 #   jobs:
 #     check:
-#       # Skip a fork's pull request: on a self-hosted runner it would run
-#       # anyone's code (README: Self-hosted runners).
-#       if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 #       uses: ethpandaops/nixos-modules/.github/workflows/host-check.yaml@<commit>
 #       with:
 #         hosts: myhost
