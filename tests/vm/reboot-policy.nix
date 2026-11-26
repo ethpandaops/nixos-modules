@@ -231,9 +231,9 @@ in
     with subtest("in the window, a logged-in user stops it"):
         login("session1")
         assert_still_up("a login")
-        # The next policy run, on the quarter hour.
+        # The next policy run, on the quarter hour: 02:30 itself if the clock hasn't moved on.
         status = machine.succeed("reboot-status")
-        assert "Tue 01 Jan 02:45 UTC" in status and "everyone to log out (logged in now: alice)" in status, status
+        assert re.search(r"Tue 01 Jan 02:(30|45) UTC", status) and "everyone to log out (logged in now: alice)" in status, status
 
     with subtest("an inhibitor stops it"):
         machine.succeed("systemd-run --unit=longjob systemd-inhibit --what=shutdown --why=longjob /run/current-system/sw/bin/sleep 600")
