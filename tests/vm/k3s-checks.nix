@@ -94,6 +94,9 @@ in
       nodeName = "machine";
       unit = "k3s.service";
     };
+    # The same system without the Node reporter's timer, to switch from.
+    specialisation.no-report.configuration.systemd.timers.nixhost-node-report.enable =
+      lib.mkForce false;
     ethpandaops.checks = {
       # No sshd in this VM: a fleet turns a built-in check off like this.
       sshd.enable = false;
@@ -138,6 +141,14 @@ in
     with subtest("k3s starts the Node reporter, which reports without being asked"):
         machine.succeed("systemctl is-active nixhost-node-report.timer")
         machine.wait_until_succeeds(f"{admin} get node machine -o go-template='{{{{index .metadata.annotations \"{prefix}reported-at\"}}}}' | grep -q Z", timeout=180)
+
+    with subtest("a live switch to a system with the Node reporter starts it, k3s running on"):
+        k3s_since = sh("systemctl show -p ActiveEnterTimestampMonotonic --value k3s.service")
+        machine.succeed("/run/booted-system/specialisation/no-report/bin/switch-to-configuration test")
+        machine.fail("systemctl is-active nixhost-node-report.timer")
+        machine.succeed("/run/booted-system/bin/switch-to-configuration test")
+        machine.succeed("systemctl is-active nixhost-node-report.timer")
+        assert sh("systemctl show -p ActiveEnterTimestampMonotonic --value k3s.service") == k3s_since
 
     # The periodic runs are on timers; the test runs them itself.
     machine.succeed("systemctl stop nixhost-checks.timer nixhost-node-report.timer nixhost-checks.service nixhost-node-report.service")
