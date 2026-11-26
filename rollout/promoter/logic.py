@@ -317,6 +317,24 @@ def host_problems(view: NodeView | None, target: str, since: int) -> list[str]:
     return out
 
 
+def unsettled(node: str, cluster: Cluster, workloads, baseline_unready=()) -> list[str]:
+    """What keeps a host that is back on the target from settling: workloads
+    it carried before it moved not ready again (unless they weren't when the
+    roll started), and its pods not Ready."""
+    out = []
+    lost = sorted(set(workloads) & cluster.unready() - set(baseline_unready))
+    if lost:
+        out.append("workloads not back: " + ", ".join(lost[:5]))
+    pods = [
+        p["metadata"]["namespace"] + "/" + p["metadata"]["name"]
+        for p in pods_on(node, cluster.pods)
+        if p["status"].get("phase") not in ("Succeeded", "Failed") and not condition(p, "Ready")
+    ]
+    if pods:
+        out.append("pods not Ready: " + ", ".join(sorted(pods)[:5]))
+    return out
+
+
 def flight_state(view: NodeView | None, hs: dict, target: str) -> str:
     """Where an in-flight host is, for its time budget: deploy, lock, drain,
     boot or ready."""
@@ -543,16 +561,7 @@ def plan_step(s: Snapshot) -> Action:
         why = host_problems(view, target, hs["advancedAt"])
         node = plan["hosts"][host]["node"]
         if not why:
-            lost = sorted(set(hs.get("workloads", [])) & s.cluster.unready() - set(s.state.get("baseline", {}).get("unready", [])))
-            if lost:
-                why.append("workloads not back: " + ", ".join(lost[:5]))
-            pods = [
-                p["metadata"]["namespace"] + "/" + p["metadata"]["name"]
-                for p in pods_on(node, s.cluster.pods)
-                if p["status"].get("phase") not in ("Succeeded", "Failed") and not condition(p, "Ready")
-            ]
-            if pods:
-                why.append("pods not Ready: " + ", ".join(sorted(pods)[:5]))
+            why = unsettled(node, s.cluster, hs.get("workloads", []), s.state.get("baseline", {}).get("unready", []))
         if not why:
             return Action("settle", host, "back on the target")
         state = flight_state(view, hs, target)

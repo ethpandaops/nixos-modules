@@ -614,8 +614,10 @@ class Promoter:
 
 def gate(args) -> int:
     """Read-only: what blocks moving one node now (pre), or why it isn't back
-    on a commit (post), for a person or a script moving a node by hand, such
-    as a fleet's migration onto NixOS."""
+    on a commit and settled (post), for a person or a script moving a node by
+    hand, such as a fleet's migration onto NixOS. post checks what the
+    promoter does before it settles a host: first the host itself, then its
+    pods and the workloads with a pod on it, which pre required ready."""
     cluster = load_cluster(args.context)
     if args.node not in cluster.nodes:
         print(f"no Node {args.node}")
@@ -626,6 +628,8 @@ def gate(args) -> int:
         if not args.target:
             raise SystemExit("post needs --target")
         problems = logic.host_problems(logic.NodeView(args.node, cluster.nodes[args.node]), args.target, 0)
+        if not problems:
+            problems = logic.unsettled(args.node, cluster, cluster.workloads_on(args.node))
     for p in problems:
         print(p)
     if not problems:
