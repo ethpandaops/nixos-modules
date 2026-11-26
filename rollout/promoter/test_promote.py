@@ -350,6 +350,25 @@ class Promote(Fleet):
         self.assertEqual(self.gate("pre", "n-p1"), (0, "n-p1: pre gates pass\n"))
         self.assertEqual(self.gate("pre", "n-missing"), (1, "no Node n-missing\n"))
 
+    def test_gate_post_waits_for_the_pods_and_workloads_on_the_node(self):
+        on_node = {"ownerReferences": [{"kind": "StatefulSet", "name": "beacon"}]}
+
+        def cluster(ready, unschedulable=False):
+            n = node("n-p1", self.c0)
+            n["spec"]["unschedulable"] = unschedulable
+            beacon = {"metadata": {"name": "beacon-0", "namespace": "eth", **on_node}, "spec": {"nodeName": "n-p1"}}
+            beacon["status"] = {"phase": "Running", "conditions": [{"type": "Ready", "status": "True" if ready else "False"}]}
+            job = {"metadata": {"name": "done", "namespace": "eth"}, "spec": {"nodeName": "n-p1"}, "status": {"phase": "Succeeded"}}
+            sts = {"metadata": {"name": "beacon", "namespace": "eth"}, "spec": {"replicas": 1}, "status": {"readyReplicas": 1 if ready else 0}}
+            self.write("cluster.json", {"nodes": [n], "pods": [beacon, job], "statefulsets": [sts]})
+
+        cluster(ready=False, unschedulable=True)
+        self.assertEqual(self.gate("post", "n-p1", self.c0), (1, "cordoned\n"))
+        cluster(ready=False)
+        self.assertEqual(self.gate("post", "n-p1", self.c0), (1, "workloads not back: eth/StatefulSet/beacon\npods not Ready: eth/beacon-0\n"))
+        cluster(ready=True)
+        self.assertEqual(self.gate("post", "n-p1", self.c0), (0, "n-p1: post gates pass\n"))
+
     def test_abandon_drops_the_target(self):
         self.put_state("staging", {"target": self.c1, "halted": {"reason": "x", "host": "s1"}, "hosts": {}})
         self.run_env("staging", action="abandon")
