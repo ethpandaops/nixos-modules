@@ -361,7 +361,11 @@ let
           clock = sh("date +%s")
           machine.succeed("date -u -s \"$(date -u -d '+8 days' +%F) 03:00:00\"", "systemctl start nixhost-reboot-policy.service")
           machine.fail("systemctl is-active -q nixhost-deadline-reboot.service")
-          assert "waiting:" in sh("journalctl -o cat _SYSTEMD_INVOCATION_ID=$(systemctl show -p InvocationID --value nixhost-reboot-policy)")
+          # The policy records every reboot it starts before starting it. Not
+          # its "waiting:" line: after the clock jump every overdue timer fires,
+          # and journald can take the line in after the run has ended, without
+          # the run's invocation ID.
+          machine.fail("test -e /var/lib/nixhost-reboot/rebooting.json")
           assert "failed its trial boot" in sh("reboot-status")
           machine.succeed(f"date -u -s @{clock}")
 
