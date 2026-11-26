@@ -132,7 +132,8 @@ in
           return status()
 
       def metric(series):
-          return sh(f"grep -F '{series} ' /var/lib/node-exporter/nixhost_checks.prom | cut -d' ' -f2")
+          # The sample's line only, not its # HELP and # TYPE lines.
+          return sh(f"awk -v s='{series}' '$1 == s {{ print $2 }}' /var/lib/node-exporter/nixhost_checks.prom")
 
       machine.wait_for_unit("multi-user.target")
       machine.wait_for_unit("sshd.service")
