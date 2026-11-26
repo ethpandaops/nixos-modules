@@ -1,0 +1,121 @@
+# Reusable: one run of the promoter for one environment of a fleet
+# (rollout/promoter at the nixos-modules commit the caller's flake.lock pins,
+# `nix run --inputs-from . nixos-modules#host-promote`). It moves at most one
+# host's deploy/<host> branch per run and records what it did on the
+# rollout-state branch; the fleet's flake provides `rolloutPlan`
+# (nixos-modules.lib.rolloutPlan). It reads the cluster with the kubeconfig
+# it's given and never writes to it. Without `apply` it's a dry run.
+#
+# The caller runs it on a schedule for every environment, and by hand for
+# resume, abandon and approve:
+#
+#   on:
+#     schedule: [{ cron: "*/10 * * * *" }]
+#     workflow_dispatch:
+#       inputs:
+#         environment: { type: choice, options: [staging, production] }
+#         action: { type: choice, options: [run, resume, abandon, approve], default: run }
+#         commit: { type: string, default: "" }
+#         apply: { type: boolean, default: false }
+#   jobs:
+#     promote:
+#       strategy:
+#         # One environment at a time: each reads what the one before it
+#         # staged, and all of them write the rollout-state branch.
+#         max-parallel: 1
+#         matrix:
+#           environment: ${{ fromJSON(github.event_name == 'schedule' && '["staging","production"]' || format('["{0}"]', inputs.environment)) }}
+#       permissions: { contents: write, actions: read }
+#       uses: ethpandaops/nixos-modules/.github/workflows/host-promote.yaml@<commit>
+#       with:
+#         environment: ${{ matrix.environment }}
+#         action: ${{ inputs.action || 'run' }}
+#         commit: ${{ inputs.commit }}
+#         apply: ${{ github.event_name == 'schedule' || inputs.apply }}
+#       secrets:
+#         kubeconfig: ${{ matrix.environment == 'staging' && secrets.KUBECONFIG_STAGING || secrets.KUBECONFIG_PRODUCTION }}
+#         discord-webhook: ${{ secrets.ROLLOUT_DISCORD_WEBHOOK }}
+#
+# Runs of one environment never overlap (the concurrency group), which
+# rollout-state's writes rely on. GitHub cancels a run that is waiting in the
+# group when another one queues: a scheduled run the next one repeats, but
+# also a resume, abandon or approve dispatched while a run is in progress.
+# Check that a manual run ran, and dispatch it again if it was cancelled.
+name: host-promote
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      action:
+        description: run, resume, abandon or approve
+        type: string
+        default: run
+      commit:
+        description: "approve: the commit a later environment may take"
+        type: string
+        default: ""
+      apply:
+        description: Push branches and state (otherwise a dry run)
+        type: boolean
+        default: false
+      grafana-url:
+        description: For the alert gate (rolloutPlan alerts = true)
+        type: string
+        default: ""
+    secrets:
+      kubeconfig:
+        description: A read-only kubeconfig for the environment's cluster
+        required: true
+      discord-webhook:
+        required: false
+      grafana-token:
+        description: A Grafana viewer token, for the alert gate
+        required: false
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: promote-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+      - name: Read-only kubeconfig
+        env:
+          KUBECONFIG_DATA: ${{ secrets.kubeconfig }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          # A secret that isn't set in the caller's repo arrives empty.
+          if [ -z "$KUBECONFIG_DATA" ]; then
+            echo "::error::the kubeconfig secret for $ENVIRONMENT is empty: is it set in the repository's secrets?"
+            exit 1
+          fi
+          mkdir -p ~/.kube
+          printf '%s' "$KUBECONFIG_DATA" >~/.kube/config
+          chmod 600 ~/.kube/config
+      - name: Promote ${{ inputs.environment }}
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          ACTION: ${{ inputs.action }}
+          COMMIT: ${{ inputs.commit }}
+          APPLY: ${{ inputs.apply }}
+          ROLLOUT_DISCORD_WEBHOOK: ${{ secrets.discord-webhook }}
+          GRAFANA_URL: ${{ inputs.grafana-url }}
+          GRAFANA_TOKEN: ${{ secrets.grafana-token }}
+        run: |
+          git config user.name "promoter"
+          git config user.email "promoter@users.noreply.github.com"
+          args=(--env "$ENVIRONMENT" --action "$ACTION")
+          if [ -n "$COMMIT" ]; then args+=(--commit "$COMMIT"); fi
+          if [ "$APPLY" = true ]; then args+=(--apply); fi
+          set -o pipefail
+          nix run --inputs-from . nixos-modules#host-promote -- "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -5,7 +5,11 @@
 # - Any orderly shutdown arms the trial (nixhost-boot.service's ExecStop),
 #   whoever reboots: the reboot policy, kured, an admin. A crash or a reset
 #   boots the confirmed system, and the admins hear when that skipped a
-#   deployed system.
+#   deployed system. A preArm hook runs first: it can have the new system
+#   boot without a trial, as the confirmed one (outcome skipped), or arm
+#   nothing (not-armed). A system whose rollback guard
+#   (ethpandaops.rollback.guard) differs from the confirmed one's boots
+#   without a trial the same way, since going back couldn't undo it.
 # - GRUB clears the trial flag on disk before it boots the trial, so a reset
 #   comes back to the confirmed system. On md RAID, where GRUB can't write
 #   through the array, it clears the copy on each member; if it can't clear
@@ -36,6 +40,15 @@
 #   trial-not-armed, with /run/reboot-required down so kured doesn't reboot
 #   it over and over) and the admins hear about it. A failed nixhost-boot
 #   holds it too.
+# - The rollback breaker (../deploy/breaker.nix): a trial that reverts
+#   (failed-check, deadline, hung) trips it and a confirmed one closes it.
+#   While it's open, a trial that fails its check or misses the stage-2
+#   deadline isn't rebooted: it ends held (not counted as a revert), stays
+#   up on the trial system for a person to decide, and the admins hear
+#   (critical); its reboot is held like a reverted one's. A trial that
+#   hangs still comes back on the confirmed system through GRUB, the
+#   watchdog and the initrd deadline, whatever the breaker says: a hung box
+#   can't be reached at all.
 #
 # Also:
 # - `grub-reboot` is ignored while trials are on: boot.cfg sets GRUB's
@@ -46,11 +59,13 @@
 #   but don't take kured's lock.
 #
 # This boot's state is /run/nixhost/boot/status.json (bootId, system,
-# confirmed, supported, trial: none, pending, confirmed or reverted, check:
-# pending, ok or failed) and nixhost_boot_status{boot_id,trial,check}.
+# confirmed, supported, trial: none, pending, confirmed, reverted or held,
+# check: pending, ok or failed) and nixhost_boot_status{boot_id,trial,check}.
 # nixhost_boot_reverts_total counts trials that failed their check, missed
 # the deadline or hung. /var/lib/nixhost-boot/trial.json has the last trial:
-# system, confirmed (its fallback), outcome and detail.
+# system, confirmed (its fallback), outcome and detail; a trial the preArm
+# hook or the rollback guard skipped is outcome skipped, and its boot's
+# trial is none.
 #
 # Needs GRUB, the systemd initrd and the deploy module's health check.
 {
@@ -64,9 +79,16 @@ let
   grub = config.boot.loader.grub;
   sysctl = config.boot.kernel.sysctl;
 
-  # How long before the deadline a trial's boot check gives up on DNS and
-  # the git remote: room for its last round of checks.
+  # How long before the deadline a trial's boot check gives up on the
+  # outside checks (DNS, the git remote): room for its last round of checks.
   outsideMargin = 120;
+
+  # Enabled health checks whose timeout isn't under half the deadline.
+  slowChecks = lib.mapAttrsToList (name: c: "${name} (${toString c.timeout} s)") (
+    lib.filterAttrs (_: c: c.enable && c.kind == "health" && 2 * c.timeout >= cfg.deadline) (
+      config.ethpandaops.checks or { }
+    )
+  );
 
   settings = pkgs.writeText "nixhost-boot.json" (
     builtins.toJSON {
@@ -77,6 +99,16 @@ let
       # turn soft and hard lockups into panics, and panic rather than wait at
       # the initrd's emergency shell.
       trialParams = "panic=60 softlockup_panic=1 hardlockup_panic=1 boot.panic_on_fail";
+      preArm =
+        if cfg.preArm == null then
+          null
+        else
+          lib.getExe (
+            pkgs.writeShellApplication {
+              name = "nixhost-boot-pre-arm";
+              text = cfg.preArm;
+            }
+          );
       # What the lockup panics go back to once a trial is confirmed.
       panicSysctls = lib.mapAttrs (key: default: toString (sysctl."kernel.${key}" or default)) {
         softlockup_panic = 0;
@@ -103,6 +135,7 @@ let
       NOTIFY=${lib.getExe config.ethpandaops.notify.package}
       ${config.ethpandaops.lib.shell}
       ${config.ethpandaops.lib.bootDefault}
+      ${config.ethpandaops.lib.breaker}
       ${builtins.readFile ./reboot-trial.sh}
     '';
   };
@@ -117,6 +150,7 @@ let
 in
 {
   imports = [
+    ../deploy/breaker.nix
     ../metrics.nix
     ../notify.nix
   ];
@@ -129,9 +163,45 @@ in
       description = ''
         Seconds after the kernel starts by which a trial boot must pass
         nixhost-boot-check, or it reboots into the confirmed system. It
-        covers the initrd too. On a trial, the check retries DNS and the git
-        remote until ${toString outsideMargin} s before it. Keep the health
-        check's timeouts well under it.
+        covers the initrd too. On a trial, the check retries the outside
+        health checks (DNS, the git remote) until ${toString outsideMargin} s
+        before it. Every enabled health check's timeout must be under half
+        of it.
+      '';
+    };
+    preArm = lib.mkOption {
+      type = lib.types.nullOr lib.types.lines;
+      default = null;
+      example = lib.literalExpression ''
+        '''
+          # A k3s minor upgrade migrates its datastore, which booting the
+          # old system again wouldn't undo: snapshot it, and skip the trial.
+          if ! cmp -s "$1/etc/k3s-minor" "$2/etc/k3s-minor"; then
+            k3s etcd-snapshot save || exit 1
+            exit 10
+          fi
+        '''
+      '';
+      description = ''
+        Bash (shellchecked; errexit, nounset, pipefail) that a shutdown runs
+        just before it arms a trial, with the system about to boot as $1
+        and the confirmed system as $2, for at most 120 s:
+
+        - exit 0 arms the trial;
+        - exit 10 boots the new system without a trial, for a change booting
+          the old one again can't undo: it becomes the confirmed system and
+          GRUB's default, trial.json records the outcome skipped (no revert
+          counted), and the admins hear once at the next boot;
+        - any other exit, or the timeout, arms nothing: the next boot is the
+          confirmed system, and the reboot is held (trial-not-armed) until
+          another system is deployed or an admin runs `nixhost-boot retry`.
+
+        After an exit 0, a system whose rollback guard differs from the
+        confirmed one's boots without a trial too.
+
+        It runs in nixhost-boot.service's ExecStop, so order that unit after
+        the services it needs (systemd.services.nixhost-boot.after), and
+        they still run then.
       '';
     };
     watchdogModules = lib.mkOption {
@@ -165,8 +235,8 @@ in
         message = "ethpandaops.reboot.trial needs the deploy module's health check (ethpandaops.deploy.healthCheck.enable).";
       }
       {
-        assertion = cfg.deadline > 2 * (config.ethpandaops.deploy.healthCheck.timeout or 0);
-        message = "ethpandaops.reboot.trial.deadline must be more than twice ethpandaops.deploy.healthCheck.timeout, so a trial's boot check can finish before it.";
+        assertion = slowChecks == [ ];
+        message = "ethpandaops.reboot.trial.deadline (${toString cfg.deadline} s) must be more than twice every enabled health check's timeout, so a trial's boot check can finish before it: ${lib.concatStringsSep ", " slowChecks}.";
       }
     ];
 

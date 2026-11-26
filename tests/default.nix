@@ -57,6 +57,8 @@ in
   hardening = vmTest ./vm/hardening.nix;
   reboot-policy = vmTest ./vm/reboot-policy.nix;
   health-check = vmTest ./vm/health-check.nix;
+  checks = vmTest ./vm/checks.nix;
+  k3s-checks = vmTest ./vm/k3s-checks.nix;
   monitoring = vmTest ./vm/monitoring.nix;
   drift = vmTest ./vm/drift.nix;
   logs = vmTest ./vm/logs.nix;
@@ -98,6 +100,8 @@ in
         "kernel"
         "kernelModules"
         "kernelParams"
+        "kernelVersion"
+        "nixosRelease"
         "systemd"
         "toplevel"
       ];
@@ -105,6 +109,147 @@ in
     pkgs.runCommand "fingerprint" { } (
       if keys == expected then "touch $out" else "echo 'fingerprint keys: ${toString keys}'; exit 1"
     );
+
+  # fingerprint.toplevel ignores the configuration revision, which changes
+  # the system itself (nixos-version reports it). Evaluated, not built.
+  fingerprint-revision =
+    let
+      at =
+        rev:
+        (server.extendModules {
+          modules = [ { system.configurationRevision = rev; } ];
+        }).config;
+      a = at "1111111111111111111111111111111111111111";
+      b = at "2222222222222222222222222222222222222222";
+    in
+    pkgs.runCommand "fingerprint-revision" { } (
+      if a.ethpandaops.fingerprint.toplevel != b.ethpandaops.fingerprint.toplevel then
+        "echo 'fingerprint.toplevel changes with the configuration revision'; exit 1"
+      else if a.system.build.toplevel.drvPath == b.system.build.toplevel.drvPath then
+        "echo 'the configuration revision does not change the system, so this proves nothing'; exit 1"
+      else
+        "touch $out"
+    );
+
+  # lib.rolloutPlan over a small fleet made from the example server: the
+  # order it promises (canaries cheapest group first, groups in order with
+  # their lead host first, `last` groups at the end), and the JSON the
+  # promoter's tests check they can step through (promoter, PLAN_JSON).
+  rollout-plan =
+    let
+      host =
+        name: env: group: extra:
+        server.extendModules {
+          modules = [
+            {
+              networking.hostName = lib.mkForce name;
+              ethpandaops.host = {
+                fleet = "example";
+                environment = lib.mkForce env;
+              };
+              ethpandaops.deploy.branch = "deploy/${name}";
+              ethpandaops.rollout = {
+                inherit group;
+              }
+              // extra;
+            }
+          ];
+        };
+      plan = self.lib.rolloutPlan {
+        hosts = {
+          s-small-1 = host "s-small-1" "staging" "small" { };
+          s-server = host "s-server" "staging" "server" { };
+          p-large-1 = host "p-large-1" "production" "large" { canary = true; };
+          p-small-1 = host "p-small-1" "production" "small" { canary = true; };
+          p-small-2 = host "p-small-2" "production" "small" { };
+          p-small-3 = host "p-small-3" "production" "small" { lead = true; };
+          p-server = host "p-server" "production" "server" { };
+          p-precious = host "p-precious" "production" "precious" { };
+        };
+        groups = [
+          "small"
+          "large"
+          "server"
+        ];
+        last = [ "precious" ];
+        windows.production = {
+          start = "07:00";
+          end = "16:00";
+        };
+      };
+      waves = env: map (w: [ w.name ] ++ w.hosts) plan.environments.${env}.waves;
+      expected = {
+        staging = [
+          [
+            "small"
+            "s-small-1"
+          ]
+          [
+            "server"
+            "s-server"
+          ]
+        ];
+        production = [
+          [
+            "canary"
+            "p-small-1"
+            "p-large-1"
+          ]
+          [
+            "small"
+            "p-small-3"
+            "p-small-2"
+          ]
+          [
+            "server"
+            "p-server"
+          ]
+          [
+            "precious"
+            "p-precious"
+          ]
+        ];
+      };
+      ok =
+        waves "staging" == expected.staging
+        && waves "production" == expected.production
+        && plan.hosts.p-small-2.deployBranch == "deploy/p-small-2"
+        && plan.windows.production.start == 420;
+    in
+    pkgs.writeText "rollout-plan.json" (
+      assert lib.assertMsg ok
+        "rolloutPlan: ${
+          builtins.toJSON {
+            staging = waves "staging";
+            production = waves "production";
+          }
+        }";
+      builtins.toJSON plan
+    );
+
+  # The promoter's tests: its decisions, and promote.py against a real git
+  # remote with SSH-signed commits and fake nix, kubectl and gh.
+  promoter =
+    pkgs.runCommand "promoter"
+      {
+        nativeBuildInputs = with pkgs; [
+          python3
+          ruff
+          git
+          openssh
+        ];
+        PLAN_JSON = self.checks.x86_64-linux.rollout-plan;
+      }
+      ''
+        export HOME=$TMPDIR
+        cp -r ${../rollout/promoter} promoter
+        chmod -R u+w promoter
+        cd promoter
+        ruff check --no-cache .
+        ruff format --no-cache --check .
+        PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
+        touch $out
+      '';
 
   # cve-scan's evidence, on NVD's records of CVEs vulnix matched to the wrong
   # package (each gets the reason a person found when triaging it) and of the

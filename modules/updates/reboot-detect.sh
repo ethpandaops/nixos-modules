@@ -55,7 +55,7 @@ if [ "${#changed[@]}" -gt 0 ] && [ -n "$TRIAL_FILE" ]; then
   elif [ -r "$TRIAL_FILE" ] && [ "$(jq -r .system "$TRIAL_FILE")" = "$(readlink -f "$target")" ]; then
     case "$(jq -r .outcome "$TRIAL_FILE")" in
     not-armed) held=trial-not-armed ;;
-    failed-check | deadline | hung | unconfirmed) held=trial-reverted ;;
+    failed-check | deadline | hung | unconfirmed | held) held=trial-reverted ;;
     esac
   fi
 fi
