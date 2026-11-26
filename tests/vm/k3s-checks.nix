@@ -92,6 +92,7 @@ in
     ethpandaops.kubernetes = {
       kubeconfig = "/var/lib/rancher/k3s/agent/kubelet.kubeconfig";
       nodeName = "machine";
+      unit = "k3s.service";
     };
     ethpandaops.checks = {
       # No sshd in this VM: a fleet turns a built-in check off like this.
@@ -133,6 +134,11 @@ in
     machine.wait_for_unit("k3s.service")
     machine.wait_until_succeeds(f"{admin} get node machine -o jsonpath='{{.status.conditions[?(@.type==\"Ready\")].status}}' | grep -qx True", timeout=300)
     machine.wait_until_succeeds("test -r /var/lib/rancher/k3s/agent/kubelet.kubeconfig")
+
+    with subtest("k3s starts the Node reporter, which reports without being asked"):
+        machine.succeed("systemctl is-active nixhost-node-report.timer")
+        machine.wait_until_succeeds(f"{admin} get node machine -o go-template='{{{{index .metadata.annotations \"{prefix}reported-at\"}}}}' | grep -q Z", timeout=180)
+
     # The periodic runs are on timers; the test runs them itself.
     machine.succeed("systemctl stop nixhost-checks.timer nixhost-node-report.timer nixhost-checks.service nixhost-node-report.service")
 

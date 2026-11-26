@@ -28,6 +28,7 @@
     kubernetes = {
       kubeconfig = "/var/lib/rancher/k3s/agent/kubelet.kubeconfig";
       nodeName = config.networking.hostName;
+      unit = "k3s.service";
     };
     checks = {
       kubelet.http = "http://127.0.0.1:10248/healthz";

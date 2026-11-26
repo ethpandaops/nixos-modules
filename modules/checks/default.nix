@@ -332,6 +332,15 @@ in
       default = null;
       description = "This host's Kubernetes Node.";
     };
+    unit = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "k3s.service";
+      description = ''
+        The systemd unit that runs this node's kubelet. The Node reporter
+        starts and stops with it, and first reports 30 s after it starts.
+      '';
+    };
     package = lib.mkPackageOption pkgs "kubectl" {
       extraDescription = "Any package with bin/kubectl, such as k3s.";
     };

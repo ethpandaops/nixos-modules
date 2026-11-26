@@ -21,7 +21,8 @@
 #   boot-check        this boot's boot check (none, pending, ok, failed)
 #   reported-at       when it last wrote, UTC (2026-11-25T10:00:00Z)
 #
-# On when ethpandaops.kubernetes.kubeconfig and nodeName are set.
+# On when ethpandaops.kubernetes.kubeconfig and nodeName are set; it also
+# needs ethpandaops.kubernetes.unit, the unit that runs the kubelet.
 {
   config,
   lib,
@@ -56,6 +57,12 @@ in
   ];
 
   config = lib.mkIf (k8s.kubeconfig != null && k8s.nodeName != null) {
+    assertions = [
+      {
+        assertion = k8s.unit != null;
+        message = "The Node reporter needs ethpandaops.kubernetes.unit, the unit that runs the kubelet (such as k3s.service).";
+      }
+    ];
     systemd.services.nixhost-node-report = {
       description = "Report this host's NixOS state on its Kubernetes Node";
       startLimitIntervalSec = 0;
@@ -68,10 +75,15 @@ in
         ExecStart = lib.getExe report;
       };
     };
+    # Started and restarted with the kubelet's unit, so the first report comes
+    # 30 s after it starts (a node back from a reboot shows its revision
+    # soon), then every minute.
     systemd.timers.nixhost-node-report = {
-      wantedBy = [ "timers.target" ];
+      wantedBy = [ k8s.unit ];
+      after = [ k8s.unit ];
+      partOf = [ k8s.unit ];
       timerConfig = {
-        OnBootSec = "1min";
+        OnActiveSec = "30s";
         OnUnitActiveSec = "1min";
         AccuracySec = "5s";
       };
