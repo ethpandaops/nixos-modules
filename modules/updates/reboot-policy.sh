@@ -1,14 +1,22 @@
-# nixhost-reboot <policy|status|hold|at|now>. SETTINGS (window, delays,
+# nixhost-reboot <policy|status|login|hold|at|now>. SETTINGS (window, delays,
 # pause) comes from the module; reboot-detect writes required.json.
 RUN=/run/nixhost/reboot
 STATE=/var/lib/nixhost-reboot
 
+# setting <name>: from SETTINGS, read once; empty for false or null.
+declare -A SETTING
+while IFS=$'\t' read -r key value; do
+  SETTING[$key]=$value
+done < <(jq -r 'to_entries[] | "\(.key)\t\(.value // "")"' "$SETTINGS")
 setting() {
-  jq -r ".$1 // empty" "$SETTINGS"
+  echo "${SETTING[$1]}"
 }
 
+# fmt <epoch>: such as "Thu 26 Nov 03:30 UTC". A builtin, so the login
+# message stays quick.
+export TZ=UTC
 fmt() {
-  date -u -d "@$1" '+%a %d %b %H:%M UTC'
+  printf '%(%a %d %b %H:%M UTC)T\n' "$1"
 }
 
 readnum() {
@@ -34,18 +42,20 @@ in_window() {
   fi
 }
 
-# next_window <epoch>: that time if it is inside the window, else the next start.
+# next_window <epoch>: the first policy run inside the window at or after that
+# time. The timer runs the policy on the quarter hour.
 next_window() {
-  local opening
-  if in_window "$1"; then
-    echo "$1"
+  local run
+  run=$((($1 + 899) / 900 * 900))
+  if in_window "$run"; then
+    echo "$run"
     return
   fi
-  opening=$(($1 - $1 % 86400 + $(setting windowStart) * 60))
-  if [ "$opening" -le "$1" ]; then
-    opening=$((opening + 86400))
+  run=$((run - run % 86400 + $(setting windowStart) * 60))
+  if [ "$run" -le "$1" ]; then
+    run=$((run + 86400))
   fi
-  echo "$opening"
+  echo $(((run + 899) / 900 * 900))
 }
 
 # Logged-in sessions that block a window reboot: active or online, not ones
@@ -162,32 +172,18 @@ kernel_series_change() {
 }
 
 clear_pending_state() {
-  rm -f "$RUN"/motd "$RUN"/status-line "$RUN"/policy.json "$RUN"/hold-until "$RUN"/hold-by \
+  rm -f "$RUN"/status-line "$RUN"/policy.json "$RUN"/hold-until "$RUN"/hold-by \
     "$RUN"/reboot-at "$RUN"/reboot-at-by "$RUN"/rebooting-at "$RUN"/notified-*
   systemctl stop nixhost-reboot-at.timer 2>/dev/null || true
 }
 
-policy() {
-  mkdir -p "$RUN" "$STATE"
-  local now since deadline paused pause_end hold hold_by at at_by earliest planned scheduled
-  local what first critical supervised held sessions inhibitors reason
+# load_state: the pending reboot as it stands now, in globals: when it
+# became pending, the deadline, holds, pauses, the time chosen with
+# reboot-at, the next time the policy may reboot (planned, 0 for none), a
+# running deadline countdown (scheduled), logins and inhibitors. It only
+# reads: policy acts on it, and message shows it.
+load_state() {
   now=$(date +%s)
-
-  # Back from a reboot this policy started: say so once.
-  if [ -r "$STATE/rebooting.json" ]; then
-    if [ "$(jq -r .boot "$STATE/rebooting.json")" != "$(cat /proc/sys/kernel/random/boot_id)" ]; then
-      notify_users ok "Back after a reboot" "The box is back after its reboot ($(jq -r .reason "$STATE/rebooting.json")), running kernel $(uname -r)."
-      rm -f "$STATE/rebooting.json"
-    fi
-  fi
-
-  if ! pending; then
-    clear_pending_state
-    write_metrics nixhost_reboot_policy </dev/null
-    echo "no reboot pending"
-    return
-  fi
-
   since=$(jq -r .since "$RUN/required.json")
   deadline=$((since + $(setting maxDelay)))
   critical=$(setting critical)
@@ -214,9 +210,9 @@ policy() {
 
   hold=$(readnum "$RUN/hold-until")
   hold_by=$(cat "$RUN/hold-by" 2>/dev/null || echo someone)
+  hold_expired=0
   if [ "$hold" -gt 0 ] && [ "$hold" -le "$now" ]; then
-    notify_users info "Reboot hold expired" "The reboot hold set by $hold_by has expired."
-    rm -f "$RUN/hold-until" "$RUN/hold-by"
+    hold_expired=1
     hold=0
   fi
   if [ "$hold" -gt "$deadline" ]; then
@@ -230,6 +226,9 @@ policy() {
   fi
 
   earliest=$(max "$((since + $(setting minDelay)))" "$(max "$hold" "$now")")
+  if [ "$paused" = 1 ]; then
+    earliest=$(max "$earliest" "$pause_end")
+  fi
   planned=$(next_window "$earliest")
   if [ "$planned" -gt "$deadline" ]; then
     planned=$deadline
@@ -262,6 +261,32 @@ policy() {
   scheduled=$(scheduled_reboot)
   sessions=$(open_sessions | sort -u | paste -sd, -)
   inhibitors=$(shutdown_inhibitors | paste -sd, -)
+}
+
+policy() {
+  mkdir -p "$RUN" "$STATE"
+  local first reason
+
+  # Back from a reboot this policy started: say so once.
+  if [ -r "$STATE/rebooting.json" ]; then
+    if [ "$(jq -r .boot "$STATE/rebooting.json")" != "$(cat /proc/sys/kernel/random/boot_id)" ]; then
+      notify_users ok "Back after a reboot" "The box is back after its reboot ($(jq -r .reason "$STATE/rebooting.json")), running kernel $(uname -r)."
+      rm -f "$STATE/rebooting.json"
+    fi
+  fi
+
+  if ! pending; then
+    clear_pending_state
+    write_metrics nixhost_reboot_policy </dev/null
+    echo "no reboot pending"
+    return
+  fi
+
+  load_state
+  if [ "$hold_expired" = 1 ]; then
+    notify_users info "Reboot hold expired" "The reboot hold set by $hold_by has expired."
+    rm -f "$RUN/hold-until" "$RUN/hold-by"
+  fi
 
   if [ "$scheduled" -eq 0 ]; then
     reason=""
@@ -297,41 +322,8 @@ policy() {
     fi
   fi
 
-  # The login message, the one-line status and reboot-status's data.
-  {
-    echo "*** $what (since $(fmt "$since"))"
-    if [ "$scheduled" -gt 0 ]; then
-      echo "*** REBOOTING at $(fmt "$scheduled"). Save your work."
-    else
-      if [ "$held" = trial-reverted ]; then
-        echo "*** The new system failed its trial boot and the box went back to the last confirmed one, so it doesn't reboot for it: an admin deploys a fix, or runs 'sudo nixhost-boot retry' to try it once more at the next reboot"
-      elif [ "$held" = trial-not-armed ]; then
-        echo "*** A trial boot of the new system couldn't be set up, so the box doesn't reboot for it: an admin fixes it (journalctl -u nixhost-boot) and runs 'sudo nixhost-boot retry'"
-      elif [ "$supervised" = 1 ]; then
-        echo "*** It doesn't reboot by itself: an admin reboots it (reboot-at or reboot-now) with someone on hand who can fix a boot that fails"
-      fi
-      if [ "$paused" = 1 ]; then
-        echo "*** Automatic reboots are paused by the admins until $(fmt "$pause_end")"
-      fi
-      if [ "$hold" -gt "$now" ]; then
-        echo "*** Held by $hold_by until $(fmt "$hold") (reboot-hold 0 clears it)"
-      fi
-      if [ "$at" -gt 0 ] && [ "$planned" = "$at" ]; then
-        echo "*** Planned reboot: $(fmt "$planned"), as $at_by asked with reboot-at"
-      elif [ "$supervised" = 0 ] && [ -z "$held" ] && [ "$planned" -lt "$deadline" ]; then
-        echo "*** Planned reboot: $(fmt "$planned"), only if nobody is logged in and no hold is set"
-      fi
-      if [ -z "$held" ] && [ "$supervised" = 1 ]; then
-        echo "*** Admins' deadline: $(fmt "$deadline")"
-      elif [ -z "$held" ]; then
-        echo "*** Hard deadline:  $(fmt "$deadline") (reboots then even if you're busy)"
-      fi
-    fi
-    echo "*** Commands: reboot-status | reboot-hold 48h | reboot-at \"Fri 02:00\" | reboot-now"
-    echo "*** Long job? Hold the reboot while it runs: reboot-hold 3d (sudo users, up to the deadline)"
-  } >"$RUN/motd.tmp"
-  mv -f "$RUN/motd.tmp" "$RUN/motd"
-  chmod 0644 "$RUN/motd"
+  # The line already-open shells and tmux show, and the data reboot-hold
+  # and reboot-at check against. The login message is worked out at login.
   if [ "$scheduled" -gt 0 ]; then
     first="Rebooting at $(fmt "$scheduled") for a pending update. Save your work."
   elif [ -n "$held" ]; then
@@ -397,15 +389,170 @@ nixhost_reboot_critical $([ -n "$critical" ] && echo 1 || echo 0)
 METRICS
 }
 
+# eta <epoch>: how long until then, in whole minutes rounded up, such as
+# "in 2d 3h", "in 5h 12m", "in 4m" or "now".
+eta() {
+  local left=$((($1 - now + 59) / 60 * 60))
+  if [ "$left" -le 0 ]; then
+    echo now
+  elif [ "$left" -ge 86400 ]; then
+    echo "in $((left / 86400))d $((left % 86400 / 3600))h"
+  elif [ "$left" -ge 3600 ]; then
+    echo "in $((left / 3600))h $((left % 3600 / 60))m"
+  else
+    echo "in $((left / 60))m"
+  fi
+}
+
+# fact <label> <line>...: a labelled line of the message, then its continuations.
+fact() {
+  local label=$1 line
+  shift
+  for line in "$@"; do
+    printf '  %-10s %s\n' "$label" "$line"
+    label=""
+  done
+}
+
+# message: the pending reboot as it stands now, for people logging in (the
+# login subcommand, which sshd runs through pam_exec) and reboot-status: a
+# panda saying when, then why, the deadline, what it waits for, and the
+# commands.
+message() {
+  local why kind width i head line logged_in=() panda bubble waits=()
+  load_state
+  why=$(jq -r '
+    def change($name; $booted; $new):
+      if $booted == $new then "rebuilt \($name) \($new)" else "\($name) \($booted) -> \($new)" end;
+    [.components[] as $c
+      | if $c == "kernel" then change("kernel"; .kernel.booted; .kernel.new)
+        elif $c == "systemd" then change("systemd"; .systemd.booted | ltrimstr("systemd-"); .systemd.new | ltrimstr("systemd-"))
+        else {"kernel-modules": "new kernel modules", "kernel-params": "new kernel parameters",
+              "etc/modules-load.d/nixos.conf": "new boot module list",
+              "boot-default": "a deploy set to start at the next boot"}[$c] // "new \($c)"
+        end]
+    | join(", ")' "$RUN/required.json")
+  if [ -n "$critical" ]; then
+    why="$why (critical)"
+  fi
+
+  if [ "$scheduled" -gt 0 ]; then
+    kind="countdown"
+    bubble=("REBOOTING SOON! SAVE YOUR WORK!" "$(fmt "$scheduled")" "$(eta "$scheduled"): the deadline has passed")
+  elif [ "$at" -gt 0 ] && [ "$planned" = "$at" ]; then
+    kind="at"
+    bubble=("REBOOT COMING!" "$(fmt "$at")" "$(eta "$at"), set by $at_by with reboot-at")
+  elif [ -n "$held" ]; then
+    kind="held"
+    if [ "$held" = trial-not-armed ]; then
+      bubble=("REBOOT PENDING, BUT HELD" "no trial boot could be set up," "so it waits for an admin")
+    else
+      bubble=("REBOOT PENDING, BUT HELD" "the update failed its trial boot," "so it waits for an admin")
+    fi
+  elif [ "$supervised" = 1 ]; then
+    kind="admin"
+    bubble=("REBOOT PENDING" "a new kernel series, so an admin" "picks the time")
+  elif [ "$planned" -ge "$deadline" ]; then
+    kind="deadline"
+    bubble=("REBOOT COMING!" "$(fmt "$deadline")" "$(eta "$deadline"): the hard deadline")
+  else
+    kind="window"
+    bubble=("REBOOT COMING!" "$(fmt "$planned")" "$(eta "$planned"), if nobody is logged in")
+  fi
+
+  # The panda, with the speech bubble at its eyes.
+  mapfile -t panda <<'PANDA'
+   .-.           .-.
+  (###)._______.(###)
+   `-/           \-'
+    /  .--.   .--.  \
+   |  /#o##\ /##o#\  |
+   |  \####/ \####/  |
+   |        ^        |
+    \     \___/     /
+     `-._________.-'
+PANDA
+  width=0
+  for line in "${bubble[@]}"; do
+    width=$(max "$width" "${#line}")
+  done
+  head=$(printf '%*s' "$((width + 2))" "" | tr ' ' -)
+  panda[2]=$(printf '%-24s   .%s.' "${panda[2]}" "$head")
+  panda[3]=$(printf '%-24s  /  %-*s  %s' "${panda[3]}" "$width" "${bubble[0]}" "\\")
+  panda[4]=$(printf '%-24s <   %-*s   |' "${panda[4]}" "$width" "${bubble[1]}")
+  panda[5]=$(printf '%-24s  %s  %-*s  /' "${panda[5]}" "\\" "$width" "${bubble[2]}")
+  panda[6]=$(printf "%-24s   '%s'" "${panda[6]}" "$head")
+  echo
+  for i in "${!panda[@]}"; do
+    echo "${panda[$i]}"
+  done
+  echo
+
+  fact "Why" "$why"
+  fact "Since" "$(fmt "$since")"
+  if [ "$supervised" = 1 ] && [ -z "$held" ] && [ "$kind" != countdown ]; then
+    fact "Deadline" "$(fmt "$deadline") ($(eta "$deadline")): the admins', not a reboot"
+  elif [ -z "$held" ] && [ "$kind" != countdown ]; then
+    fact "Deadline" "$(fmt "$deadline") ($(eta "$deadline")): reboots even if you're busy"
+  fi
+  case "$held" in
+  trial-reverted)
+    fact "Held" "The new system failed its trial boot, so the box went back to" \
+      "the last confirmed one. An admin deploys a fix, or runs" "'sudo nixhost-boot retry' to try it again."
+    ;;
+  trial-not-armed)
+    fact "Held" "No trial boot of the new system could be set up. An admin" \
+      "fixes it (journalctl -u nixhost-boot) and runs" "'sudo nixhost-boot retry'."
+    ;;
+  esac
+  if [ "$kind" = admin ]; then
+    fact "Admins" "Reboot it with reboot-at or reboot-now while someone who" \
+      "can fix a boot that fails is on hand."
+  fi
+  if [ "$at" -gt 0 ] && [ "$kind" != at ] && [ "$kind" != countdown ]; then
+    fact "Reboot-at" "$(fmt "$at") ($(eta "$at")), set by $at_by, even if you're busy"
+  fi
+
+  # What keeps it from an earlier window. Pauses and holds end by the
+  # deadline; logins and inhibitors only hold up the window.
+  if [ "$kind" = window ] || [ "$kind" = deadline ]; then
+    if [ "$paused" = 1 ]; then
+      fact "Paused" "by the admins until $(fmt "$pause_end") ($(eta "$pause_end"))"
+    fi
+    if [ "$hold" -gt "$now" ]; then
+      fact "On hold" "by $hold_by (reboot-hold) until $(fmt "$hold") ($(eta "$hold"))"
+    fi
+  fi
+  if [ "$kind" = window ]; then
+    # Who is logging in counts: their session may not be listed yet.
+    IFS=, read -ra logged_in <<<"$sessions"
+    if [ -n "${PAM_USER:-}" ]; then
+      logged_in+=("$PAM_USER")
+    fi
+    if [ "${#logged_in[@]}" -gt 0 ]; then
+      line=$(printf '%s\n' "${logged_in[@]}" | sort -u | paste -sd, -)
+      waits+=("everyone to log out (logged in now: ${line//,/, })")
+    fi
+    if [ -n "$inhibitors" ]; then
+      waits+=("inhibitors to end: ${inhibitors//,/, }")
+    fi
+  fi
+  if [ "${#waits[@]}" -gt 0 ]; then
+    fact "Waits for" "${waits[@]}"
+  fi
+  if [ "$kind" = window ]; then
+    fact "Long job?" "reboot-hold 3d holds the reboot (sudo users, up to the deadline)"
+  fi
+  fact "Commands" "reboot-status | reboot-hold 2d | reboot-at \"Fri 02:00\" | reboot-now"
+  echo
+}
+
 status() {
   if ! pending; then
     echo "No reboot pending."
     return
   fi
-  cat "$RUN/motd" 2>/dev/null || echo "A reboot is pending."
-  echo
-  echo "Logged in now: $(open_sessions | sort -u | paste -sd, - || true)"
-  echo "Shutdown inhibitors: $(shutdown_inhibitors | paste -sd, - || true)"
+  message
 }
 
 refresh() {
@@ -504,6 +651,8 @@ case "${1:-}" in
   policy) policy ;;
   countdown) countdown "$2" ;;
   status) status ;;
+  # The SSH login message: nothing while no reboot is pending.
+  login) if pending; then message; fi ;;
   hold)
     shift
     hold "$@"
@@ -517,7 +666,7 @@ case "${1:-}" in
     now_ "$@"
     ;;
   *)
-    echo "usage: nixhost-reboot <policy|status|hold|at|now>" >&2
+    echo "usage: nixhost-reboot <policy|status|login|hold|at|now>" >&2
     exit 2
     ;;
 esac

@@ -1,7 +1,8 @@
 # The reboot policy for a box with an interactive user. When reboot-detect
-# says a reboot is needed, this tells people (login message, a line at the
-# next shell prompt, the system tmux status line, wall, and each user's notify
-# targets) and reboots:
+# says a reboot is needed, this tells people (a panda at each SSH login with
+# a terminal, worked out then, a line at the prompt of open shells when it
+# changes, the system tmux status line, wall, and each user's notify targets)
+# and reboots:
 #
 # - in the nightly window, once minDelay has passed, when nobody is logged in,
 #   no hold is set and nothing holds a `systemd-inhibit --what=shutdown` lock;
@@ -201,17 +202,37 @@ in
       };
     };
 
-    # The login message. pam_motd shows nothing while the file is absent.
-    users.motdFile = "/run/nixhost/reboot/motd";
-    security.pam.services.sshd.showMotd = true;
+    # The login message, worked out from the state at login (nothing while no
+    # reboot is pending). sshd passes on what PAM says when a session opens
+    # only to sessions with a terminal, so scp, sftp, rsync, git and
+    # `ssh host cmd` get nothing.
+    security.pam.services.sshd.rules.session.nixhost-reboot = {
+      # Where pam_motd goes: after pam_systemd has registered the session.
+      order = config.security.pam.services.sshd.rules.session.motd.order + 1;
+      control = "optional";
+      modulePath = "${config.security.pam.package}/lib/security/pam_exec.so";
+      args = [
+        "type=open_session"
+        "stdout"
+        "quiet"
+        # It takes well under a second; this only stops a hang blocking logins.
+        "${pkgs.coreutils}/bin/timeout"
+        "10"
+        (lib.getExe package)
+        "login"
+      ];
+    };
 
     # Already-open shells, including tmux and screen panes, print the status
-    # line at their next prompt whenever it changes.
+    # line at their next prompt whenever it changes. A new shell starts from
+    # the current line: a login has just shown it.
     programs.bash.interactiveShellInit = ''
+      __nixhost_reboot_last=""
+      [ -r ${statusLine} ] && __nixhost_reboot_last=$(<${statusLine})
       __nixhost_reboot_notice() {
         local line=""
         [ -r ${statusLine} ] && line=$(<${statusLine})
-        if [ -n "$line" ] && [ "$line" != "''${__nixhost_reboot_last-}" ]; then
+        if [ -n "$line" ] && [ "$line" != "$__nixhost_reboot_last" ]; then
           printf '\n*** %s\n' "$line" >&2
         fi
         __nixhost_reboot_last=$line
@@ -219,10 +240,12 @@ in
       PROMPT_COMMAND+=(__nixhost_reboot_notice)
     '';
     programs.zsh.interactiveShellInit = ''
+      __nixhost_reboot_last=""
+      [ -r ${statusLine} ] && __nixhost_reboot_last=$(<${statusLine})
       __nixhost_reboot_notice() {
         local line=""
         [ -r ${statusLine} ] && line=$(<${statusLine})
-        if [ -n "$line" ] && [ "$line" != "''${__nixhost_reboot_last-}" ]; then
+        if [ -n "$line" ] && [ "$line" != "$__nixhost_reboot_last" ]; then
           printf '\n*** %s\n' "$line" >&2
         fi
         __nixhost_reboot_last=$line
