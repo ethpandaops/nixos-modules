@@ -5,6 +5,7 @@ PATH that answer from JSON files. Run: python3 -m unittest (in this directory).
 
 import argparse
 import contextlib
+import copy
 import io
 import json
 import os
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 
@@ -47,6 +49,7 @@ print(1 if m and m.group(1) in json.load(open(os.environ["FAKE"] + "/passed.json
 """
 
 STAGING, PROD = ["s1"], ["p1", "p2"]
+OLD_STATE = "0" * 40
 
 
 def fp(**over):
@@ -330,6 +333,53 @@ class Promote(Fleet):
         self.assertEqual(self.state("staging")["abandoned"], [self.c1])
         _, out = self.run_env("staging", apply=False)
         self.assertIn("nothing to roll", out)
+
+    def test_a_state_push_another_environment_beat_is_retried_on_top_of_it(self):
+        self.put_state("production", {"target": OLD_STATE})
+        repo = promote.Repo(str(self.work), "origin")
+        repo.fetch()
+        # Another environment's run, in its own clone, pushes after this one fetched.
+        other = self.dir / "other"
+        self.sh("git", "clone", "-q", str(self.remote), str(other), cwd=self.dir)
+        theirs = promote.Repo(str(other), "origin")
+        theirs.fetch()
+        theirs.write_state("rollout-state", "production", {"target": self.c0}, "production: test")
+        repo.write_state("rollout-state", "staging", {"target": self.c1}, "staging: test")
+        self.assertEqual(self.state("staging"), {"target": self.c1})
+        self.assertEqual(self.state("production"), {"target": self.c0})
+
+    def converge(self, plan=None):
+        if plan:
+            self.write("plan.json", plan)
+        p = self.promoter("staging")
+        p.state = {"target": self.c1, "hosts": {"s1": {"target": self.c1, "class": "switch", "settledAt": 1}}}
+        with contextlib.redirect_stdout(io.StringIO()):
+            p.converge(self.c1, types.SimpleNamespace(urgent=False))
+        return p.state
+
+    def test_a_later_host_the_target_does_not_evaluate_for_stages_as_the_worst_class(self):
+        del self.fps[self.c1]["p1"]
+        self.write("fingerprints.json", self.fps)
+        entry = self.converge()["staged"][-1]
+        self.assertEqual((entry["commit"], entry["class"], entry.get("needsApproval")), (self.c1, "release", True))
+
+    def test_every_environment_but_the_last_stages_for_the_next(self):
+        plan = copy.deepcopy(self.plan)
+        plan["environmentOrder"] = ["staging", "production", "later"]
+        plan["environments"]["later"] = {"waves": []}
+        self.write("plan.json", plan)
+        p = self.promoter("production")
+        p.state = {"target": self.c1, "hosts": {h: {"target": self.c1, "class": "switch"} for h in PROD}}
+        with contextlib.redirect_stdout(io.StringIO()):
+            p.converge(self.c1, types.SimpleNamespace(urgent=False))
+        self.assertEqual(p.state["staged"][-1]["commit"], self.c1)
+        plan["environmentOrder"] = ["staging", "production"]
+        self.write("plan.json", plan)
+        p = self.promoter("production")
+        p.state = {"target": self.c1, "hosts": {}}
+        with contextlib.redirect_stdout(io.StringIO()):
+            p.converge(self.c1, types.SimpleNamespace(urgent=False))
+        self.assertNotIn("staged", p.state)
 
 
 class Urgency(Fleet):

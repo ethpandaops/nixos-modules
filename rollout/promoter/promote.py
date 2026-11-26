@@ -88,16 +88,28 @@ class Repo:
         out = self.file(f"{self.remote}/{branch}", f"{env}.json")
         return json.loads(out) if out else {}
 
-    def write_state(self, branch: str, env: str, state: dict, message: str) -> None:
-        """Commit <env>.json on the state branch with plumbing and push it."""
-        parent = self.ref(branch)
-        entries = self.git("ls-tree", parent).splitlines() if parent else []
+    def write_state(self, branch: str, env: str, state: dict, message: str, attempts: int = 4) -> None:
+        """Commit <env>.json on the state branch with plumbing and push it.
+
+        Each environment writes only its own file, so when another
+        environment's run pushed first, the commit is rebuilt on the new
+        parent and pushed again. Runs of one environment never overlap (the
+        workflow's concurrency group), so nothing of this one is lost."""
         blob = self.git("hash-object", "-w", "--stdin", input=json.dumps(state, indent=2, sort_keys=True) + "\n")
-        entries = [e for e in entries if not e.endswith(f"\t{env}.json")] + [f"100644 blob {blob}\t{env}.json"]
-        tree = self.git("mktree", input="\n".join(entries) + "\n")
-        commit = self.git("commit-tree", tree, *(["-p", parent] if parent else []), "-m", message)
-        self.git("push", "--quiet", self.remote, f"{commit}:refs/heads/{branch}")
-        self.git("update-ref", f"refs/remotes/{self.remote}/{branch}", commit)
+        for attempt in range(attempts):
+            parent = self.ref(branch)
+            entries = self.git("ls-tree", parent).splitlines() if parent else []
+            entries = [e for e in entries if not e.endswith(f"\t{env}.json")] + [f"100644 blob {blob}\t{env}.json"]
+            tree = self.git("mktree", input="\n".join(entries) + "\n")
+            commit = self.git("commit-tree", tree, *(["-p", parent] if parent else []), "-m", message)
+            if self.ok("push", "--quiet", self.remote, f"{commit}:refs/heads/{branch}"):
+                self.git("update-ref", f"refs/remotes/{self.remote}/{branch}", commit)
+                return
+            if attempt + 1 == attempts:
+                break
+            time.sleep(2 * (attempt + 1))
+            self.git("fetch", "--quiet", self.remote, f"+refs/heads/{branch}:refs/remotes/{self.remote}/{branch}", check=False)
+        raise RuntimeError(f"couldn't push {branch} after {attempts} tries")
 
 
 # Facts
@@ -410,8 +422,10 @@ class Promoter:
     def fingerprint(self, rev: str, host: str) -> dict:
         """One host's fingerprint at a commit, evaluated with the rest of the
         environment's hosts in one go; alone if that fails, to name the host."""
+        env = self.plan["hosts"][host]["env"]
+        batch = [h for h, info in self.plan["hosts"].items() if info["env"] == env]
         try:
-            return self.fps.get(rev, self.hosts)[host]
+            return self.fps.get(rev, batch)[host]
         except RuntimeError:
             return self.fps.get(rev, [host])[host]
 
@@ -429,21 +443,32 @@ class Promoter:
         return ""
 
     def converge(self, target: str, snap: logic.Snapshot) -> None:
+        """Record that every host runs the target; for any environment that
+        has one after it, stage the commit for the next one, with the worst
+        class it brings to this or any later environment."""
         mine = logic.worst(self.plan, [hs.get("class", "reboot") for hs in self.state["hosts"].values() if hs.get("target") == target])
         self.state["convergedTarget"] = target
         self.state.setdefault("converged", []).append({"commit": target, "at": self.now})
-        if not self.first:
+        order = self.plan["environmentOrder"]
+        later = set(order[logic.env_index(self.plan, self.env) + 1 :])
+        if not later:
             self.say(f"every host runs {target[:12]}")
             return
-        later_hosts = [h for h, info in self.plan["hosts"].items() if info["env"] != self.env]
         classes = []
-        for h in later_hosts:
+        for h in (h for h, info in self.plan["hosts"].items() if info["env"] in later):
             ref = self.repo.ref(self.plan["hosts"][h]["deployBranch"])
             if not ref:
                 continue
+            # Best effort: a later host the target doesn't evaluate for counts
+            # as the most disruptive class (its own environment halts on it),
+            # and one whose start doesn't evaluate as a reboot.
             try:
-                new = self.fps.get(target, [h])[h]
-                old = self.fps.get(ref, [h])[h]
+                new = self.fingerprint(target, h)
+            except RuntimeError:
+                classes.append(logic.class_names(self.plan)[-1])
+                continue
+            try:
+                old = self.fingerprint(ref, h)
             except RuntimeError:
                 old = None
             classes.append(logic.classify(self.plan, old, new))

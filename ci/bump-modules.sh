@@ -17,7 +17,8 @@
 # systemd, kernel parameters, boot-time modules, an inhibitor or the NixOS
 # release change in a built host's fingerprint), at the last commit its
 # second environment's canaries settled on (production.json,
-# `canariesSettled`). AFTER_TOKEN reads that repo. Until that fleet has a
+# `canariesSettled`). AFTER_TOKEN reads that repo, or the job's own GH_TOKEN
+# when it isn't set (enough for a public repo). Until that fleet has a
 # rollout state at all (no host of it runs its rollout yet), nothing is gated.
 input=nixos-modules repo=ethpandaops/nixos-modules min_age=0 build="" branch=master mode=push after=""
 while [ "$#" -gt 0 ]; do
@@ -69,10 +70,10 @@ default=$(gh api "repos/$repo" --jq .default_branch)
 # repo's rollout-state names, or nothing.
 gate_rev() {
   local state commit
-  state=$(GH_TOKEN=${AFTER_TOKEN:-} gh api "repos/$after/contents/$1.json?ref=rollout-state" --jq .content 2>/dev/null | base64 -d) || return 0
+  state=$(GH_TOKEN=${AFTER_TOKEN:-${GH_TOKEN:-}} gh api "repos/$after/contents/$1.json?ref=rollout-state" --jq .content 2>/dev/null | base64 -d) || return 0
   commit=$(jq -r "$2 // empty" <<<"$state")
   [ -n "$commit" ] || return 0
-  GH_TOKEN=${AFTER_TOKEN:-} gh api "repos/$after/contents/flake.lock?ref=$commit" --jq .content | base64 -d |
+  GH_TOKEN=${AFTER_TOKEN:-${GH_TOKEN:-}} gh api "repos/$after/contents/flake.lock?ref=$commit" --jq .content | base64 -d |
     jq -r --arg input "$input" '.nodes[.nodes.root.inputs[$input]].locked.rev // empty'
 }
 
@@ -105,11 +106,13 @@ reboot_fields() {
 staged="" canaries=""
 # GitHub answers 404 for a private repo the token can't read, so see the
 # repo first: a token that can't fails the run instead of lifting the gate.
-if [ -n "$after" ] && ! GH_TOKEN=${AFTER_TOKEN:-} gh api "repos/$after" --silent; then
-  echo "::error::AFTER_TOKEN can't read $after"
+if [ -n "$after" ] && ! GH_TOKEN=${AFTER_TOKEN:-${GH_TOKEN:-}} gh api "repos/$after" --silent; then
+  who="the job's token"
+  [ -z "${AFTER_TOKEN:-}" ] || who=AFTER_TOKEN
+  echo "::error::$who can't read $after"
   exit 1
 fi
-if [ -n "$after" ] && ! probe=$(GH_TOKEN=${AFTER_TOKEN:-} gh api "repos/$after/contents/staging.json?ref=rollout-state" --silent 2>&1); then
+if [ -n "$after" ] && ! probe=$(GH_TOKEN=${AFTER_TOKEN:-${GH_TOKEN:-}} gh api "repos/$after/contents/staging.json?ref=rollout-state" --silent 2>&1); then
   if [[ $probe != *"HTTP 404"* ]]; then
     echo "::error::can't read $after's rollout state: $probe"
     exit 1
