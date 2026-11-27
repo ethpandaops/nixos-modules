@@ -81,7 +81,10 @@
         monitoring = module "monitoring" [ ./modules/monitoring ];
         banlist = module "banlist" [ ./modules/banlist ];
         static-network = module "static-network" [ ./modules/static-network.nix ];
-        digitalocean = module "digitalocean" [ ./modules/digitalocean.nix ];
+        digitalocean = module "digitalocean" [
+          disko.nixosModules.disko
+          ./modules/digitalocean.nix
+        ];
         k3s = module "k3s" [
           self.nixosModules.secrets
           self.nixosModules.deploy

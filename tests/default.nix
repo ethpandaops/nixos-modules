@@ -75,6 +75,14 @@ in
   banlist = vmTest ./vm/banlist.nix;
   k3s = vmTest ./vm/k3s.nix;
   digitalocean = vmTest ./vm/digitalocean.nix;
+  digitalocean-disk = import ./vm/digitalocean-disk.nix {
+    inherit
+      self
+      pkgs
+      nixpkgs
+      disko
+      ;
+  };
 
   # The k3s module's agents and joining servers, which the VM test's single
   # server doesn't show. Evaluated, not built.
