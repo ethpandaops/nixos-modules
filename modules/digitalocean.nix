@@ -59,13 +59,15 @@ let
       ${waitOnline} --interface="$public:degraded" --timeout=120
       install -d -m 0755 "$(dirname "$metadata")"
       install -d -m 0700 "$(dirname "$saved")"
-      rm -f "$metadata.tmp"
       attempts=30
       [ ! -s "$saved" ] || attempts=5
       for _ in $(seq "$attempts"); do
-        if (umask 077 && curl -fsS --max-time 5 -o "$metadata.tmp" http://169.254.169.254/metadata/v1.json); then
+        rm -f "$metadata.tmp"
+        if (umask 077 && curl -fsS --max-time 5 -o "$metadata.tmp" http://169.254.169.254/metadata/v1.json) &&
+          jq -e '.interfaces.public[0].mac' "$metadata.tmp" >/dev/null 2>&1; then
           break
         fi
+        rm -f "$metadata.tmp"
         sleep 2
       done
       stale=
@@ -150,7 +152,8 @@ let
         echo "configured from the saved metadata; retrying the metadata service" >&2
         exit 1
       fi
-      install -m 0600 "$metadata" "$saved"
+      install -m 0600 "$metadata" "$saved.tmp"
+      mv "$saved.tmp" "$saved"
     '';
   };
 in
