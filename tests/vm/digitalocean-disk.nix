@@ -51,7 +51,6 @@ diskoLib.testLib.makeDiskoTest {
     };
   extraTestScript = ''
     import json
-    import shlex
 
     def sh(command):
         return machine.succeed(command).strip()
