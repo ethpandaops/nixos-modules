@@ -190,6 +190,16 @@ in
         };
       };
       services.comin.enable = lib.mkForce false;
+      systemd.services.needs-network = {
+        wantedBy = [ "multi-user.target" ];
+        wants = [ "network-online.target" ];
+        after = [ "network-online.target" ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${pkgs.coreutils}/bin/true";
+        };
+      };
     };
   };
 
