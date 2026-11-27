@@ -65,7 +65,7 @@ A host repo's workflows call the reusable ones here, pinned by commit:
 | `host-deploy.yaml` | builds a host at a commit whose check passed and fast-forwards the branch comin pulls |
 | `host-update-nixpkgs.yaml` | moves nixpkgs to the newest channel release at least a day old |
 | `host-refresh-keys.yaml` | refreshes `keys/<login>.keys` from GitHub for the people already listed, with a webhook notice |
-| `host-bump-modules.yaml` | moves `nixos-modules` to the newest master commit whose check passed and that is old enough; with `after`, only to a commit another fleet's staged rollout has run |
+| `host-bump-modules.yaml` | moves `nixos-modules` to the newest master commit whose check passed and that is old enough |
 | `host-promote.yaml` | one run of a fleet's staged rollout for one environment (below) |
 | `host-cve-scan.yaml` | scans the hosts' systems with vulnix; takes a channel release at once when it fixes a critical CVE, and proposes whitelisting the critical CVEs that have evidence they don't apply, for a person to check |
 | `host-kernel-series.yaml` | proposes moving the pinned kernel series once a newer one is at x.y.4 and has been in the channel 3 weeks; with `auto-merge`, lands it once its check passed |

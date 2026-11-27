@@ -30,14 +30,6 @@ on:
         description: "push to the branch, or pr: a pull request a person lands as their own signed commit (for nodes that deploy only signed commits)"
         type: string
         default: push
-      after:
-        description: "owner/repo of a fleet with a staged rollout: take only nixos-modules commits its staging ran (and, for a reboot here, its production canaries)"
-        type: string
-        default: ""
-    secrets:
-      after-token:
-        description: Reads the after repo's rollout-state branch and flake.lock
-        required: false
 jobs:
   bump:
     if: github.ref_name == inputs.branch
@@ -57,8 +49,6 @@ jobs:
           MIN_AGE: ${{ inputs.min-age-hours }}
           BRANCH: ${{ inputs.branch }}
           MODE: ${{ inputs.mode }}
-          AFTER: ${{ inputs.after }}
-          AFTER_TOKEN: ${{ secrets.after-token }}
         run: |
           nix run --inputs-from . nixos-modules#bump-modules -- \
-            --build "$BUILD" --min-age-hours "$MIN_AGE" --branch "$BRANCH" --mode "$MODE" ${AFTER:+--after "$AFTER"}
+            --build "$BUILD" --min-age-hours "$MIN_AGE" --branch "$BRANCH" --mode "$MODE"

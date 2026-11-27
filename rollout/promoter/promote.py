@@ -337,7 +337,7 @@ class Promoter:
         return None if target in abandoned else target
 
     def new_roll(self, target: str, lane: list[str], why: str) -> None:
-        keep = {k: self.state[k] for k in ("staged", "convergedTarget", "approved", "abandoned", "canariesSettled") if k in self.state}
+        keep = {k: self.state[k] for k in ("staged", "convergedTarget", "approved", "abandoned") if k in self.state}
         # startedAt, like each host's "from", is a record for people reading
         # rollout-state; the promoter doesn't read it.
         self.state = {**keep, "target": target, "startedAt": self.now, "baseline": logic.baseline(self.cluster), "hosts": {}, "lane": lane}
@@ -581,11 +581,6 @@ class Promoter:
                 hs["settledAt"] = self.now
                 hs.pop("state", None)
                 self.say(f"{action.host} settled on {target[:12]}")
-                canaries = next((w["hosts"] for w in logic.waves_of(self.plan, self.env) if w["name"] == "canary"), [])
-                done = lambda h: self.state["hosts"].get(h, {}).get("target") == target and self.state["hosts"][h].get("settledAt")  # noqa: E731
-                if canaries and all(done(h) or not refs.get(h) for h in canaries) and (self.state.get("canariesSettled") or [{}])[-1].get("commit") != target:
-                    # Read by fleets that follow this one (bump-modules --after).
-                    self.state.setdefault("canariesSettled", []).append({"commit": target, "at": self.now})
                 continue
             if action.kind == "converge":
                 self.converge(target, snap)
