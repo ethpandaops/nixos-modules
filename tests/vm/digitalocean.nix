@@ -226,7 +226,7 @@ in
           return sh(droplet, "readlink -f /run/booted-system")
 
       def ssh(key, user, host="${public.address}"):
-          return f"ssh -i /etc/test-keys/{key} -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 {user}@{host} true"
+          return f"ssh -n -i /etc/test-keys/{key} -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 {user}@{host} true"
 
       def metric(series):
           return sh(droplet, f"awk -v s={shlex.quote(series + ' ')} 'index($0, s) == 1 {{ print $NF; exit }}' /var/lib/node-exporter/*.prom")
@@ -253,6 +253,10 @@ in
           finished = int(sh(droplet, "systemctl show -p ExecMainExitTimestampMonotonic --value digitalocean-network"))
           online = int(sh(droplet, "systemctl show -p ActiveEnterTimestampMonotonic --value network-online.target"))
           assert 0 < finished <= online, (finished, online)
+          assert "multi-user.target" in sh(droplet, "systemctl show -p WantedBy --value digitalocean-network")
+          droplet.succeed("systemctl start nixhost-checks.service")
+          check = json.loads(sh(droplet, "cat /run/nixhost/checks/status.json"))["checks"]["digitalocean-network"]
+          assert check["ok"] and check["kind"] == "health" and check["outside"], check
 
       with subtest("node-exporter answers on the VPC NIC only"):
           cloud.wait_until_succeeds("curl -sf --max-time 5 -o /dev/null http://${private.address}:9100/metrics")

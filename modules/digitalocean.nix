@@ -16,6 +16,17 @@
 # - the image doesn't rebuild itself from user data, run the vendor data's
 #   entropy script, write root's authorized_keys (root can't log in) or run
 #   do-agent. metadataKeysUser lets one account accept the droplet's SSH keys.
+# - nixpkgs adds panic=1 and boot.panic_on_fail to every boot, so an initrd
+#   failure reboots after a second; the way back is GRUB's menu on the
+#   droplet console. Trials are unaffected: their panic=60 comes later.
+#
+# The image has no host key and no deploy key: SSH makes the host key at the
+# first boot, so a droplet's sops recipient is only known once it runs.
+# Read it (ssh-keyscan, ssh-to-age), encrypt the host's secrets to it, with
+# comin's deploy key among them (deploy.deployKeyFile), and switch the
+# droplet to its configuration once with nixos-rebuild --target-host. Bake
+# neither key into the image: DigitalOcean keeps it in the account, and
+# every droplet made from it would share them.
 #
 # Droplets have no hardware watchdog, so reboot trials run without one.
 {
@@ -87,7 +98,10 @@ let
   };
 in
 {
-  imports = [ (modulesPath + "/virtualisation/digital-ocean-image.nix") ];
+  imports = [
+    (modulesPath + "/virtualisation/digital-ocean-image.nix")
+    ./checks
+  ];
 
   options.ethpandaops.digitalocean = {
     interfaces = {
@@ -160,11 +174,15 @@ in
       };
     };
 
-    systemd.services.digitalocean-metadata.environment.DO_DELAY_ATTEMPTS_MAX = lib.mkForce "120";
+    systemd.services.digitalocean-metadata.serviceConfig.ExecStartPre =
+      "${config.systemd.package}/lib/systemd/systemd-networkd-wait-online --interface=${cfg.interfaces.public}:routable --timeout=120";
 
     systemd.services.digitalocean-network = {
       description = "Configure the VPC NIC from the droplet metadata";
-      wantedBy = [ "network-online.target" ];
+      wantedBy = [
+        "multi-user.target"
+        "network-online.target"
+      ];
       before = [ "network-online.target" ];
       requires = [ "digitalocean-metadata.service" ];
       after = [
@@ -176,7 +194,13 @@ in
         Type = "oneshot";
         RemainAfterExit = true;
         ExecStart = lib.getExe privateNetwork;
+        Restart = "on-failure";
+        RestartSec = 10;
       };
+    };
+    ethpandaops.checks.digitalocean-network = {
+      unit = "digitalocean-network.service";
+      outside = true;
     };
 
     # srvos sets this list with mkForce.
