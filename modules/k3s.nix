@@ -71,7 +71,7 @@ in
     package = lib.mkOption {
       type = lib.types.package;
       example = lib.literalExpression "pkgs.k3s_1_35";
-      description = "The k3s this node runs. Set it per cluster: there's no default, so a module update never moves a cluster's k3s.";
+      description = "The k3s this node runs. Set it per cluster: there's no default, so a module update never moves a cluster's k3s. An agent must never run a newer minor than its servers, since the kubelet may not be newer than the apiserver.";
     };
     role = lib.mkOption {
       type = lib.types.enum [
@@ -231,6 +231,8 @@ in
         ExecStartPre = [ etcdGuard ];
         ExecStartPost = [ bootstrapCleanup ];
       };
+      # Restarting a server takes its apiserver and etcd down, an outage on a
+      # one-server cluster, so a server picks changes up at its reboot.
       restartIfChanged = !isServer;
     };
 
@@ -259,6 +261,7 @@ in
     environment.etc."nixhost/k3s-version".text = cfg.package.version;
     systemd.services.k3s-pre-minor-snapshot = lib.mkIf isServer {
       description = "etcd snapshot before a reboot into a new k3s minor";
+      # Ordered after k3s, so it stops first, while etcd is still up.
       after = [ "k3s.service" ];
       wantedBy = [ "multi-user.target" ];
       restartIfChanged = false;

@@ -186,7 +186,7 @@ in
         reboot_into("${otherMinor}")
         assert pre_minor() == 1
 
-    with subtest("turning snapshots off removes the drop-in, and k3s still starts"):
+    with subtest("turning snapshots off removes the drop-in"):
         # The snapshot inhibitor changes, so the switch needs NIXOS_NO_CHECK.
         machine.succeed("NIXOS_NO_CHECK=1 /run/booted-system/specialisation/no-snapshots/bin/switch-to-configuration test")
         machine.fail("test -e /etc/rancher/k3s/config.yaml.d/etcd-snapshots.yaml || test -L /etc/rancher/k3s/config.yaml.d/etcd-snapshots.yaml")
