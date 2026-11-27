@@ -73,6 +73,82 @@ in
   reboot-trial-boot-md10 = trialTest false "md10";
   comin-ssh = vmTest ./vm/comin-ssh.nix;
   banlist = vmTest ./vm/banlist.nix;
+  k3s = vmTest ./vm/k3s.nix;
+
+  # The k3s module's agents and joining servers, which the VM test's single
+  # server doesn't show. Evaluated, not built.
+  k3s-roles =
+    let
+      node =
+        settings:
+        (server.extendModules {
+          modules = [
+            self.nixosModules.k3s
+            {
+              ethpandaops.k3s = {
+                package = pkgs.k3s;
+              }
+              // settings;
+            }
+          ];
+        }).config;
+      join = {
+        serverAddr = "https://192.0.2.1:6443";
+        tokenFile = "/run/k3s-token";
+      };
+      snapshots = {
+        enable = true;
+        bucket = "etcd";
+        folder = "example";
+      };
+      agent = node ({ role = "agent"; } // join);
+      first = node {
+        role = "server";
+        etcdSnapshots = snapshots;
+      };
+      joining = node ({ role = "server"; } // join);
+
+      execStart = c: c.systemd.services.k3s.serviceConfig.ExecStart;
+      guarded =
+        c:
+        lib.hasInfix "k3s-etcd-guard" (toString (c.systemd.services.k3s.serviceConfig.ExecStartPre or [ ]));
+      inhibitors = c: lib.filter (lib.hasPrefix "k3s") (lib.attrNames c.system.switch.inhibitors);
+      results = {
+        "agent registers with its server" = lib.hasInfix "--server https://192.0.2.1:6443" (
+          execStart agent
+        );
+        "agent restarts on a switch" = agent.systemd.services.k3s.restartIfChanged;
+        "agent has no etcd guard" = !guarded agent;
+        "agent has no pre-minor snapshot" = !(agent.systemd.services ? k3s-pre-minor-snapshot);
+        "agent's switch inhibitors" = inhibitors agent == [ "k3s-version" ];
+        "agent's rollback guard" = lib.attrNames agent.ethpandaops.rollback.guard == [ "k3s-version" ];
+        "agent's k3s checks are outside health checks" =
+          agent.ethpandaops.checks.k3s.kind == "health" && agent.ethpandaops.checks.kubelet.outside;
+        "first server starts etcd" = lib.hasInfix "--cluster-init" (execStart first);
+        "first server has the etcd guard" = guarded first;
+        "first server waits for a reboot" = !first.systemd.services.k3s.restartIfChanged;
+        "first server's switch inhibitors" =
+          inhibitors first == [
+            "k3s-server-snapshots"
+            "k3s-server-unit"
+            "k3s-version"
+          ];
+        "joining server joins" =
+          lib.hasInfix "--server https://192.0.2.1:6443" (execStart joining)
+          && !lib.hasInfix "--cluster-init" (execStart joining);
+        "joining server has no etcd guard" = !guarded joining;
+        "joining server has no snapshot inhibitor" =
+          !(joining.system.switch.inhibitors ? k3s-server-snapshots);
+      };
+      failed = lib.attrNames (lib.filterAttrs (_: ok: !ok) results);
+    in
+    pkgs.runCommand "k3s-roles" { failed = lib.concatStringsSep "; " failed; } ''
+      if [ -n "$failed" ]; then
+        echo "k3s-roles failed: $failed"
+        exit 1
+      fi
+      touch $out
+    '';
 
   # raid1-disks refuses a kernel that can't assemble arrays made by a newer one.
   raid1-rejects-old-kernel =

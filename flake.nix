@@ -81,6 +81,11 @@
         monitoring = module "monitoring" [ ./modules/monitoring ];
         banlist = module "banlist" [ ./modules/banlist ];
         static-network = module "static-network" [ ./modules/static-network.nix ];
+        k3s = module "k3s" [
+          self.nixosModules.secrets
+          self.nixosModules.deploy
+          ./modules/k3s.nix
+        ];
         raid1-disks = module "raid1-disks" [
           disko.nixosModules.disko
           ./modules/raid1-disks.nix
