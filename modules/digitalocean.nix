@@ -9,13 +9,17 @@
 #
 # - Disk: disko's layout on `disk` (/dev/vda): a BIOS boot partition for
 #   GRUB, since droplets boot with SeaBIOS, and ext4 root on the rest, which
-#   reboot trials support.
+#   reboot trials support. Root grows when the droplet is resized with its
+#   disk.
 # - Network: DigitalOcean serves DHCP only to droplets made from custom
 #   images. Its own images are configured from the droplet metadata,
 #   reached over a link-local address on the public NIC, as cloud-init does,
 #   and so is this. At each boot digitalocean-network.service fetches
-#   http://169.254.169.254/metadata/v1.json into metadataFile, checks both
-#   NICs' MACs against it, and gives them their addresses: on the public NIC
+#   http://169.254.169.254/metadata/v1.json into metadataFile and saves a
+#   copy under /var/lib/digitalocean; if the service doesn't answer, it
+#   configures the network from that copy, then fails and retries until a
+#   fetch works. It checks both NICs' MACs against the metadata and gives
+#   them their addresses: on the public NIC
 #   IPv4, the anchor IP for reserved IPs, IPv6 if the droplet has it, the
 #   default routes and the DNS servers; on the VPC NIC its address and the
 #   routes to the rest of 10.0.0.0/8, 172.16.0.0/12 and 192.168.0.0/16
@@ -35,6 +39,7 @@
 let
   cfg = config.ethpandaops.digitalocean;
   keysDir = "/run/digitalocean/authorized_keys.d";
+  saved = "/var/lib/digitalocean/metadata.json";
   waitOnline = "${config.systemd.package}/lib/systemd/systemd-networkd-wait-online";
 
   network = pkgs.writeShellApplication {
@@ -49,21 +54,31 @@ let
       metadata=${lib.escapeShellArg cfg.metadataFile}
       public=${lib.escapeShellArg cfg.interfaces.public}
       private=${lib.escapeShellArg cfg.interfaces.private}
+      saved=${saved}
 
       ${waitOnline} --interface="$public:degraded" --timeout=120
       install -d -m 0755 "$(dirname "$metadata")"
-      for _ in $(seq 30); do
-        if curl -fsS --max-time 5 -o "$metadata.tmp" http://169.254.169.254/metadata/v1.json; then
+      install -d -m 0700 "$(dirname "$saved")"
+      rm -f "$metadata.tmp"
+      attempts=30
+      [ ! -s "$saved" ] || attempts=5
+      for _ in $(seq "$attempts"); do
+        if (umask 077 && curl -fsS --max-time 5 -o "$metadata.tmp" http://169.254.169.254/metadata/v1.json); then
           break
         fi
         sleep 2
       done
-      if [ ! -s "$metadata.tmp" ]; then
+      stale=
+      if [ -s "$metadata.tmp" ]; then
+        mv "$metadata.tmp" "$metadata"
+      elif [ -s "$saved" ]; then
+        echo "no droplet metadata from 169.254.169.254 on $public; using the copy saved $(date -r "$saved" -u +%FT%TZ)" >&2
+        install -m 0600 "$saved" "$metadata"
+        stale=1
+      else
         echo "no droplet metadata from 169.254.169.254 on $public" >&2
         exit 1
       fi
-      chmod 0600 "$metadata.tmp"
-      mv "$metadata.tmp" "$metadata"
 
       get() { jq -r "$1 // empty" "$metadata"; }
       check_mac() {
@@ -125,6 +140,17 @@ let
       networkctl reload
       ${waitOnline} --interface="$public:routable" --interface="$private:routable" --timeout=60
       echo "$public: $(get "$p.ipv4.ip_address"); $private: $(get "$v.ipv4.ip_address")"
+      ${lib.optionalString (cfg.metadataKeysUser != null) ''
+        install -d -m 0755 ${keysDir}
+        get '.public_keys[]?' >${keysDir}/.tmp
+        chmod 0444 ${keysDir}/.tmp
+        mv ${keysDir}/.tmp ${keysDir}/${cfg.metadataKeysUser}
+      ''}
+      if [ -n "$stale" ]; then
+        echo "configured from the saved metadata; retrying the metadata service" >&2
+        exit 1
+      fi
+      install -m 0600 "$metadata" "$saved"
     '';
   };
 in
@@ -156,7 +182,7 @@ in
       type = lib.types.str;
       readOnly = true;
       default = "/run/digitalocean/metadata.json";
-      description = "This boot's droplet metadata (mode 0600), once digitalocean-network.service has started.";
+      description = "The droplet metadata (mode 0600) digitalocean-network.service last configured the network from: this boot's, or the last one saved if the metadata service didn't answer.";
     };
     metadataKeysUser = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
@@ -183,6 +209,8 @@ in
 
     disko.devices = (import ./digitalocean-layout.nix cfg.disk).disko.devices;
     boot.loader.grub.enable = true;
+    boot.growPartition = true;
+    fileSystems."/".autoResize = true;
 
     networking.useNetworkd = true;
     networking.useDHCP = false;
@@ -214,7 +242,6 @@ in
       ];
       before = [ "network-online.target" ];
       after = [ "systemd-networkd.service" ];
-      restartIfChanged = false;
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
@@ -235,25 +262,5 @@ in
         "${keysDir}/%u"
       ]
     );
-    systemd.services.digitalocean-authorized-keys = lib.mkIf (cfg.metadataKeysUser != null) {
-      description = "Accept the droplet's SSH keys for ${cfg.metadataKeysUser}";
-      wantedBy = [ "multi-user.target" ];
-      requires = [ "digitalocean-network.service" ];
-      after = [ "digitalocean-network.service" ];
-      path = [
-        pkgs.coreutils
-        pkgs.jq
-      ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-      };
-      script = ''
-        install -d -m 0755 ${keysDir}
-        jq -r '.public_keys[]?' ${cfg.metadataFile} >${keysDir}/.tmp
-        chmod 0444 ${keysDir}/.tmp
-        mv ${keysDir}/.tmp ${keysDir}/${cfg.metadataKeysUser}
-      '';
-    };
   };
 }

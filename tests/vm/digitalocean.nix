@@ -6,7 +6,8 @@
 # the metadata, and the VPC NIC its address and routes, before
 # network-online.target; node-exporter answers on the VPC only; the
 # droplet's SSH keys log in only to metadataKeysUser; NICs that don't match
-# the metadata's MACs fail digitalocean-network and its health check.
+# the metadata's MACs fail digitalocean-network and its health check; and a
+# boot while the metadata service is down uses the saved metadata.
 {
   self,
   lib,
@@ -261,5 +262,17 @@ in
         assert not json.loads(sh(droplet, "cat /run/nixhost/checks/status.json"))["checks"]["digitalocean-network"]["ok"]
         cloud.succeed("cp /tmp/good.json /var/lib/metadata/metadata/v1.json")
         droplet.wait_until_succeeds("systemctl is-active digitalocean-network.service", timeout=60)
+
+    with subtest("a boot while the metadata service is down gets its network from the saved metadata, and retries until the service answers"):
+        cloud.succeed("systemctl stop metadata.service")
+        droplet.shutdown()
+        droplet.start()
+        droplet.wait_until_succeeds("ip -4 -o addr show dev eth2 | grep -q ' ${private.address}/20 '", timeout=180)
+        droplet.succeed("ip -4 -o addr show dev eth1 | grep -q ' ${public.address}/24 '")
+        droplet.succeed("journalctl -b -o cat -u digitalocean-network | grep -q 'using the copy saved'")
+        droplet.fail("systemctl is-active digitalocean-network.service")
+        cloud.wait_until_succeeds(ssh("metadata", "example"))
+        cloud.succeed("systemctl start metadata.service")
+        droplet.wait_until_succeeds("systemctl is-active digitalocean-network.service", timeout=120)
   '';
 }
