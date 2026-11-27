@@ -31,12 +31,19 @@ on:
         description: The nixosConfigurations the repo must hold, space-separated (empty skips the guard)
         type: string
         default: ""
+      runs-on:
+        description: 'The runner: a label, or JSON for labels or a runner group, such as {"group": "my-hosts", "labels": ["my-hosts"]} (README: Self-hosted runners)'
+        type: string
+        default: ubuntu-latest
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (startsWith(inputs.runs-on, '{') || startsWith(inputs.runs-on, '[')) && fromJSON(inputs.runs-on) || inputs.runs-on }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes: no token in .git while the build runs.
+          persist-credentials: false
       - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
       - name: Check
         env:

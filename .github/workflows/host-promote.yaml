@@ -33,7 +33,9 @@
 #         commit: ${{ inputs.commit }}
 #         apply: ${{ github.event_name == 'schedule' || inputs.apply }}
 #       secrets:
-#         kubeconfig: ${{ matrix.environment == 'staging' && secrets.KUBECONFIG_STAGING || secrets.KUBECONFIG_PRODUCTION }}
+#         # Each environment's own only: `a && b || c` gives staging
+#         # production's kubeconfig when KUBECONFIG_STAGING is empty.
+#         kubeconfig: ${{ matrix.environment == 'staging' && secrets.KUBECONFIG_STAGING || matrix.environment == 'production' && secrets.KUBECONFIG_PRODUCTION || '' }}
 #         discord-webhook: ${{ secrets.ROLLOUT_DISCORD_WEBHOOK }}
 #
 # Runs of one environment never overlap (the concurrency group), which
@@ -64,6 +66,10 @@ on:
         description: For the alert gate (rolloutPlan alerts = true)
         type: string
         default: ""
+      runs-on:
+        description: 'The runner: a label, or JSON for labels or a runner group, such as {"group": "my-hosts", "labels": ["my-hosts"]} (README: Self-hosted runners)'
+        type: string
+        default: ubuntu-latest
     secrets:
       kubeconfig:
         description: A read-only kubeconfig for the environment's cluster
@@ -75,7 +81,7 @@ on:
         required: false
 jobs:
   promote:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (startsWith(inputs.runs-on, '{') || startsWith(inputs.runs-on, '[')) && fromJSON(inputs.runs-on) || inputs.runs-on }}
     timeout-minutes: 30
     concurrency:
       group: promote-${{ inputs.environment }}
@@ -99,9 +105,10 @@ jobs:
             echo "::error::the kubeconfig secret for $ENVIRONMENT is empty: is it set in the repository's secrets?"
             exit 1
           fi
-          mkdir -p ~/.kube
-          printf '%s' "$KUBECONFIG_DATA" >~/.kube/config
-          chmod 600 ~/.kube/config
+          # In the job's temp directory, which the runner empties after every
+          # job: a self-hosted runner that runs another job keeps nothing.
+          (umask 077 && printf '%s' "$KUBECONFIG_DATA" >"$RUNNER_TEMP/kubeconfig")
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >>"$GITHUB_ENV"
       - name: Promote ${{ inputs.environment }}
         env:
           ENVIRONMENT: ${{ inputs.environment }}
