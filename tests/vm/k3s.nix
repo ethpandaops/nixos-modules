@@ -186,6 +186,15 @@ in
         reboot_into("${otherMinor}")
         assert pre_minor() == 1
 
+        # A `test` activation of the new minor moved current-system, but k3s
+        # still runs the booted minor. Snapshot names end in the second.
+        machine.sleep(1)
+        current = sh("readlink /run/current-system")
+        machine.succeed("ln -sfn ${otherMinor} /run/current-system")
+        reboot_into("${otherMinor}")
+        machine.succeed(f"ln -sfn {current} /run/current-system")
+        assert pre_minor() == 2
+
     with subtest("turning snapshots off removes the drop-in"):
         # The snapshot inhibitor changes, so the switch needs NIXOS_NO_CHECK.
         machine.succeed("NIXOS_NO_CHECK=1 /run/booted-system/specialisation/no-snapshots/bin/switch-to-configuration test")

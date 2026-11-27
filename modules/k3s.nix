@@ -23,7 +23,7 @@ let
       {
         echo "$data has no etcd member: not starting a new cluster."
         echo "Check that $data is mounted."
-        echo "To recover, restore a snapshot (k3s server --cluster-reset --cluster-reset-restore-path=<snapshot>), or rejoin through serverAddr if other servers exist."
+        echo "To recover, restore a snapshot (k3s server --data-dir=$data --cluster-reset --cluster-reset-restore-path=<snapshot>), or rejoin through serverAddr if other servers exist."
         echo "Only for a brand-new cluster: install -D /dev/null $bootstrap"
       } >&2
       exit 1
@@ -50,7 +50,9 @@ let
       ${config.ethpandaops.lib.bootDefault}
       minor() { cut -d. -f1-2 "$1/etc/nixhost/k3s-version" 2>/dev/null || echo unknown; }
       next=$(boot_default || true)
-      if [ -n "$next" ] && [ "$(minor "$next")" != "$(minor /run/current-system)" ]; then
+      # A server runs the k3s it booted with: a `test` activation moves
+      # current-system, not k3s.
+      if [ -n "$next" ] && [ "$(minor "$next")" != "$(minor /run/booted-system)" ]; then
         ${cfg.package}/bin/k3s etcd-snapshot save --data-dir ${arg cfg.dataDir} --name pre-minor-upgrade
       fi
     '';
