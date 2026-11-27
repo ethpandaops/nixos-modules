@@ -74,6 +74,7 @@ in
   comin-ssh = vmTest ./vm/comin-ssh.nix;
   banlist = vmTest ./vm/banlist.nix;
   k3s = vmTest ./vm/k3s.nix;
+  digitalocean = vmTest ./vm/digitalocean.nix;
 
   # The k3s module's agents and joining servers, which the VM test's single
   # server doesn't show. Evaluated, not built.

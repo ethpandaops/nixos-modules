@@ -30,6 +30,9 @@ shipping over a tailnet. Every module is tested in a NixOS VM in CI.
 }
 ```
 
+On a DigitalOcean droplet, `digitalocean` takes the place of
+`static-network` and `raid1-disks`.
+
 `configuration.nix` sets values under `ethpandaops.*`. Read each module's
 header comment and options for the details; the smallest complete example
 is [tests/server.nix](tests/server.nix).
@@ -50,6 +53,7 @@ is [tests/server.nix](tests/server.nix).
 | `banlist` | `ethpandaops.banlist`: pulls a signed fleet ban list every 30 s (by default from the log shipping endpoint) and drops new connections from its sources, or only counts them in shadow mode; private, CGNAT, loopback and link-local sources (and an optional `allowFile`) are never blocked, and a list that's too wide, too large, stale, replayed or badly signed is refused |
 | `k3s` | `ethpandaops.k3s`: k3s for either role from a package each cluster sets (node name, IPs, labels, taints, data dir, extra flags); a server that would start a new etcd cluster from an empty data dir refuses until a person creates its bootstrap file; scheduled etcd snapshots to S3-compatible storage with the endpoint and keys from sops, and one before a reboot into a new k3s minor; k3s version changes (and a server's unit and snapshot settings) wait for a reboot and are a rollback guard; graceful node shutdown with logind's delay to match; the `k3s`, `kubelet` and `node-ready` checks |
 | `static-network` | a static, MAC-matched uplink with systemd-networkd |
+| `digitalocean` | a droplet made from a custom image: nixpkgs' DigitalOcean image (`system.build.digitalOceanImage`, a gzipped qcow2 to upload as a custom image), GRUB on `/dev/vda` and a root filesystem that grows to the droplet's disk; the public NIC on DigitalOcean's DHCP, and the VPC NIC's address and routes to other private networks from the droplet metadata, checked against the NICs' MACs before `network-online.target`. Nothing runs from user data or vendor data; the droplet's SSH keys log in only to `metadataKeysUser`, if set. Droplets have no hardware watchdog, so reboot trials run without one |
 | `raid1-disks` | disko layout: mdadm RAID1 for the ESP and root on every listed disk, GRUB on each |
 
 Every box-side check writes `nixhost_*` metrics through node-exporter's
