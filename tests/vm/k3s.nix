@@ -190,7 +190,12 @@ in
         # still runs the booted minor. Snapshot names end in the second.
         machine.sleep(1)
         current = sh("readlink /run/current-system")
-        machine.succeed("ln -sfn ${otherMinor} /run/current-system")
+        machine.succeed(
+            "cp -a $(readlink -f /run/current-system) /run/tested-system"
+            " && rm /run/tested-system/etc && mkdir -p /run/tested-system/etc/nixhost"
+            " && echo 0.1.0 > /run/tested-system/etc/nixhost/k3s-version"
+            " && ln -sfn /run/tested-system /run/current-system"
+        )
         reboot_into("${otherMinor}")
         machine.succeed(f"ln -sfn {current} /run/current-system")
         assert pre_minor() == 2
