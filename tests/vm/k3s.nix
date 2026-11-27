@@ -65,77 +65,83 @@ in
 {
   name = "k3s";
 
-  nodes.machine = {
-    imports = [ self.nixosModules.k3s ];
-    virtualisation = {
-      memorySize = 3072;
-      diskSize = 4096;
-      cores = 2;
-    };
-
-    ethpandaops.k3s = {
-      package = pkgs.k3s;
-      role = "server";
-      inherit dataDir bootstrapFile;
-      labels."example.com/pool" = "test";
-      extraFlags = [ "--pause-image=test.local/pause:local" ];
-      gracefulShutdown.period = 45;
-      etcdSnapshots = {
-        enable = true;
-        schedule = "* * * * *";
-        bucket = "etcd";
-        folder = "test-cluster";
+  nodes.machine =
+    { config, ... }:
+    {
+      imports = [ self.nixosModules.k3s ];
+      virtualisation = {
+        memorySize = 3072;
+        diskSize = 4096;
+        cores = 2;
       };
-    };
-    services.k3s = {
-      disable = [
-        "coredns"
-        "local-storage"
-        "metrics-server"
-        "servicelb"
-        "traefik"
+
+      ethpandaops.k3s = {
+        package = pkgs.k3s;
+        role = "server";
+        inherit dataDir bootstrapFile;
+        labels."example.com/pool" = "test";
+        extraFlags = [ "--pause-image=test.local/pause:local" ];
+        gracefulShutdown.period = 45;
+        etcdSnapshots = {
+          enable = true;
+          schedule = "* * * * *";
+          bucket = "etcd";
+          folder = "test-cluster";
+        };
+      };
+      services.k3s = {
+        disable = [
+          "coredns"
+          "local-storage"
+          "metrics-server"
+          "servicelb"
+          "traefik"
+        ];
+        images = [ image ];
+      };
+      environment.systemPackages = [
+        pkgs.jq
+        pkgs.kubectl
       ];
-      images = [ image ];
-    };
-    environment.systemPackages = [
-      pkgs.jq
-      pkgs.kubectl
-    ];
 
-    ethpandaops.secrets.file = "${fixtures}/secrets.yaml";
-    sops = {
-      age.keyFile = "/var/lib/sops-test/age.key";
-      age.sshKeyPaths = lib.mkForce [ ];
-      validateSopsFiles = false;
-    };
-    # sops-nix won't read a key from the store.
-    system.activationScripts.sopsTestKey = "install -D -m 0400 ${fixtures}/age.key /var/lib/sops-test/age.key";
-    system.activationScripts.setupSecrets.deps = [ "sopsTestKey" ];
-
-    # Buckets are the directories in /var/lib/s3.
-    systemd.services.s3 = {
-      wantedBy = [ "multi-user.target" ];
-      environment.HOME = "/var/lib/s3";
-      serviceConfig = {
-        StateDirectory = "s3";
-        ExecStart = "${lib.getExe pkgs.rclone} serve s3 /var/lib/s3 --addr 127.0.0.1:9000 --cert ${fixtures}/s3.crt --key ${fixtures}/s3.key --auth-key ${accessKey},${secretKey}";
+      ethpandaops.secrets.file = "${fixtures}/secrets.yaml";
+      sops = {
+        age.keyFile = "/var/lib/sops-test/age.key";
+        age.sshKeyPaths = lib.mkForce [ ];
+        validateSopsFiles = false;
       };
-    };
-    networking.hosts."127.0.0.1" = [ "s3.test" ];
-    security.pki.certificateFiles = [ "${fixtures}/s3.crt" ];
-
-    ethpandaops.deploy = {
-      # comin isn't run here, nor the network checks.
-      repository = "/var/lib/remote.git";
-      deployKeyFile = null;
-      healthCheck = {
-        dnsName = null;
-        checkRemote = false;
+      # sops-nix won't read a key from the store.
+      system.activationScripts.sopsTestKey = "install -D -m 0400 ${fixtures}/age.key /var/lib/sops-test/age.key";
+      system.activationScripts.setupSecrets = lib.mkIf (config.sops.secrets != { }) {
+        deps = [ "sopsTestKey" ];
       };
+
+      # Buckets are the directories in /var/lib/s3.
+      systemd.services.s3 = {
+        wantedBy = [ "multi-user.target" ];
+        environment.HOME = "/var/lib/s3";
+        serviceConfig = {
+          StateDirectory = "s3";
+          ExecStart = "${lib.getExe pkgs.rclone} serve s3 /var/lib/s3 --addr 127.0.0.1:9000 --cert ${fixtures}/s3.crt --key ${fixtures}/s3.key --auth-key ${accessKey},${secretKey}";
+        };
+      };
+      networking.hosts."127.0.0.1" = [ "s3.test" ];
+      security.pki.certificateFiles = [ "${fixtures}/s3.crt" ];
+
+      ethpandaops.deploy = {
+        # comin isn't run here, nor the network checks.
+        repository = "/var/lib/remote.git";
+        deployKeyFile = null;
+        healthCheck = {
+          dnsName = null;
+          checkRemote = false;
+        };
+      };
+      services.comin.enable = lib.mkForce false;
+      ethpandaops.checks.sshd.enable = false;
+
+      specialisation.no-snapshots.configuration.ethpandaops.k3s.etcdSnapshots.enable = lib.mkForce false;
     };
-    services.comin.enable = lib.mkForce false;
-    ethpandaops.checks.sshd.enable = false;
-  };
 
   testScript = ''
     import json
@@ -181,6 +187,13 @@ in
         machine.succeed("k3s etcd-snapshot save --data-dir ${dataDir} --name pre-minor-upgrade")
         machine.succeed(f"ls {bucket} | grep -q '^pre-minor-upgrade-machine-'")
         machine.succeed("systemctl is-active k3s-pre-minor-snapshot.service")
+
+    with subtest("turning snapshots off removes the drop-in, and k3s still starts"):
+        # The snapshot inhibitor changes, so the switch needs NIXOS_NO_CHECK.
+        machine.succeed("NIXOS_NO_CHECK=1 /run/booted-system/specialisation/no-snapshots/bin/switch-to-configuration test")
+        machine.fail("test -e /etc/rancher/k3s/config.yaml.d/etcd-snapshots.yaml || test -L /etc/rancher/k3s/config.yaml.d/etcd-snapshots.yaml")
+        machine.succeed("systemctl restart k3s.service")
+        machine.wait_for_unit("k3s.service")
 
     with subtest("a k3s version is never rolled back, nor the server's data dir"):
         guard = json.loads(sh("cat /etc/nixhost/rollback-guard.json"))

@@ -1,39 +1,6 @@
-# k3s from nixpkgs (services.k3s, one k3s.service for either role) on a
-# node the other modules deploy, check and reboot:
-#
-# - A server without serverAddr starts embedded etcd (--cluster-init). If
-#   its data dir has no etcd member, it refuses to start rather than create
-#   a new, empty cluster (a new CA and token nothing else trusts), unless a
-#   person creates bootstrapFile on purpose; that file is removed once the
-#   new cluster is up. A restore (`k3s server --cluster-reset`) runs by hand
-#   and needs no bootstrap file. A server with serverAddr joins an existing
-#   etcd cluster.
-# - With etcdSnapshots, servers snapshot etcd on a schedule to S3-compatible
-#   storage. The endpoint and keys are sops secrets (etcd-s3-endpoint,
-#   etcd-s3-access-key, etcd-s3-secret-key), written to a drop-in k3s reads
-#   next to its config file.
-# - A server takes a snapshot as it shuts down for a reboot into a new k3s
-#   minor, while etcd is still up: the way back from a minor upgrade is a
-#   snapshot the old minor took. A failed snapshot doesn't hold the reboot.
-#   It reads the next system from GRUB's or systemd-boot's default entry;
-#   with another bootloader it takes none.
-# - A new k3s version, and on a server any change to its unit or snapshot
-#   settings, is a switch inhibitor: the node picks it up in a reboot (which
-#   a reboot policy such as kured drains first) instead of a live restart.
-#   Agents restart k3s on a switch. No automatic rollback or trial boot
-#   crosses a k3s version or a server's data dir (ethpandaops.rollback.guard):
-#   k3s can't run an older minor on a datastore a newer one migrated.
-# - Graceful node shutdown, with logind allowing the kubelet to delay a
-#   shutdown that long.
-# - Checks: k3s (the unit), kubelet (its /healthz) and node-ready (the Node
-#   is Ready, through the kubelet's own credentials, ethpandaops.kubernetes).
-#   On agents the first two are outside health checks, so a broken agent
-#   rolls back, and a server outage that fails them too gets a second try;
-#   on servers they're readiness checks. Set ethpandaops.checks.<name> to
-#   change them.
-#
-# The k3s package is the consumer's: set it per cluster. An agent may never
-# run a newer minor than its servers.
+# k3s for either role (ethpandaops.k3s), with an etcd guard and snapshots on
+# servers, and the switch inhibitors, rollback guards and checks the deploy
+# module needs. Each cluster sets its own k3s package.
 {
   config,
   lib,
@@ -61,8 +28,6 @@ let
     exit 0
   '';
 
-  # Snapshots when the system the bootloader boots next has another k3s
-  # minor than the running one.
   preMinorSnapshot = pkgs.writeShellApplication {
     name = "k3s-pre-minor-snapshot";
     runtimeInputs = with pkgs; [
@@ -81,6 +46,7 @@ let
     '';
   };
 
+  snapshotDropIn = "/etc/rancher/k3s/config.yaml.d/etcd-snapshots.yaml";
   snapshotSettings = {
     inherit (cfg.etcdSnapshots)
       schedule
@@ -156,7 +122,7 @@ in
     bootstrapFile = lib.mkOption {
       type = lib.types.str;
       default = "/var/lib/nixhost-k3s/bootstrap-etcd";
-      description = "Create this file to let a server whose data dir has no etcd start a new cluster.";
+      description = "A server that would start embedded etcd refuses to while its data dir has no etcd member, unless this file exists; it's removed once etcd is up.";
     };
     gracefulShutdown = {
       period = lib.mkOption {
@@ -171,7 +137,7 @@ in
       };
     };
     etcdSnapshots = {
-      enable = lib.mkEnableOption "scheduled etcd snapshots to S3-compatible storage on servers";
+      enable = lib.mkEnableOption "scheduled etcd snapshots to S3-compatible storage on servers, with the endpoint and keys from the sops secrets etcd-s3-endpoint, etcd-s3-access-key and etcd-s3-secret-key";
       schedule = lib.mkOption {
         type = lib.types.str;
         default = "0 */6 * * *";
@@ -230,8 +196,6 @@ in
         ExecStartPre = [ etcdGuard ];
         ExecStartPost = [ bootstrapCleanup ];
       };
-      # Restarting a server's apiserver and etcd is an outage on a cluster
-      # with one server, so a server's change waits for its reboot.
       restartIfChanged = !isServer;
     };
 
@@ -242,12 +206,11 @@ in
       k3s-server-unit = builtins.hashString "sha256" (
         toString config.systemd.services.k3s.serviceConfig.ExecStart
       );
-    }
-    # The snapshot settings, not the endpoint and keys: they're in the sops
-    # file with other secrets, whose every edit would then reboot the
-    # server. Rotating them takes a k3s restart.
-    // lib.optionalAttrs snapshots {
-      k3s-server-snapshots = builtins.hashString "sha256" (builtins.toJSON snapshotSettings);
+      # Not the secrets: any edit to the sops file would reboot the server.
+      # Present while snapshots are off too, since NixOS compares only keys
+      # both systems have.
+      k3s-server-snapshots =
+        if snapshots then builtins.hashString "sha256" (builtins.toJSON snapshotSettings) else "off";
     };
 
     ethpandaops.rollback.guard = {
@@ -258,8 +221,6 @@ in
     };
 
     environment.etc."nixhost/k3s-version".text = cfg.package.version;
-    # Stops before k3s does, so etcd is still up. The bootloader's default
-    # entry is the next boot whichever profile installed it.
     systemd.services.k3s-pre-minor-snapshot = lib.mkIf isServer {
       description = "etcd snapshot before a reboot into a new k3s minor";
       after = [ "k3s.service" ];
@@ -283,7 +244,7 @@ in
       etcd-s3-secret-key = { };
     };
     sops.templates."k3s-etcd-snapshots.yaml" = lib.mkIf snapshots {
-      path = "/etc/rancher/k3s/config.yaml.d/etcd-snapshots.yaml";
+      path = snapshotDropIn;
       content = ''
         etcd-snapshot-schedule-cron: "${cfg.etcdSnapshots.schedule}"
         etcd-snapshot-retention: ${toString cfg.etcdSnapshots.retention}
@@ -299,6 +260,10 @@ in
         etcd-s3-timeout: "5m0s"
       '';
     };
+
+    # sops-nix leaves a dropped template's symlink behind, dangling, and k3s
+    # fails on an unreadable drop-in.
+    systemd.tmpfiles.rules = lib.mkIf (!snapshots) [ "r ${snapshotDropIn}" ];
 
     ethpandaops.kubernetes = {
       kubeconfig = lib.mkDefault "${cfg.dataDir}/agent/kubelet.kubeconfig";

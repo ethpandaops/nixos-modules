@@ -137,8 +137,8 @@ in
           lib.hasInfix "--server https://192.0.2.1:6443" (execStart joining)
           && !lib.hasInfix "--cluster-init" (execStart joining);
         "joining server has no etcd guard" = !guarded joining;
-        "joining server has no snapshot inhibitor" =
-          !(joining.system.switch.inhibitors ? k3s-server-snapshots);
+        "joining server's snapshot inhibitor is off" =
+          joining.system.switch.inhibitors.k3s-server-snapshots == "off";
       };
       failed = lib.attrNames (lib.filterAttrs (_: ok: !ok) results);
     in
