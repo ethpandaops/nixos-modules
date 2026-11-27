@@ -113,7 +113,29 @@ in
         c:
         lib.hasInfix "k3s-etcd-guard" (toString (c.systemd.services.k3s.serviceConfig.ExecStartPre or [ ]));
       inhibitors = c: lib.filter (lib.hasPrefix "k3s") (lib.attrNames c.system.switch.inhibitors);
+      kubeletConfigRefused =
+        flags:
+        refused "ethpandaops.k3s.extraFlags sets the kubelet's config file" (node {
+          role = "server";
+          extraFlags = flags;
+        });
       results = {
+        "every spelling of the kubelet's config file in extraFlags is refused" =
+          lib.all kubeletConfigRefused
+            [
+              [ "--kubelet-arg=config=/x" ]
+              [
+                "--kubelet-arg"
+                "config=/x"
+              ]
+              [ "--kubelet-arg config=/x" ]
+              [ "--kubelet-arg=--config=/x" ]
+            ];
+        "other kubelet args are accepted" =
+          !kubeletConfigRefused [
+            "--kubelet-arg=max-pods=200"
+            "--node-label=config=x"
+          ];
         "agent registers with its server" = lib.hasInfix "--server https://192.0.2.1:6443" (
           execStart agent
         );
@@ -172,10 +194,6 @@ in
               }
             ];
           }).config;
-        "ethpandaops.k3s.extraFlags has --kubelet-arg=config=" = node {
-          role = "server";
-          extraFlags = [ "--kubelet-arg=config=/etc/kubelet.yaml" ];
-        };
       };
       refused = message: c: lib.any (a: !a.assertion && lib.hasPrefix message a.message) c.assertions;
       failed =

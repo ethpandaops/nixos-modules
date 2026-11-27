@@ -129,7 +129,7 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "--flannel-backend=none" ];
-      description = "More k3s flags, after the ones the other options set. Kubelet settings go in services.k3s.extraKubeletConfig: a --kubelet-arg=config= here would replace the module's kubelet config.";
+      description = "More k3s flags, after the ones the other options set. Kubelet settings go in services.k3s.extraKubeletConfig: a --kubelet-arg config= here would replace the module's kubelet config.";
     };
     bootstrapFile = lib.mkOption {
       type = lib.types.str;
@@ -203,8 +203,9 @@ in
         message = "ethpandaops.k3s.dataDir is ${cfg.dataDir}, but nixpkgs writes services.k3s.images, manifests, charts, autoDeployCharts and containerdConfigTemplate under ${defaultDataDir}, where this k3s never reads them. Leave them unset or keep the default data dir.";
       }
       {
-        assertion = !lib.any (lib.hasPrefix "--kubelet-arg=config=") cfg.extraFlags;
-        message = "ethpandaops.k3s.extraFlags has --kubelet-arg=config=, which replaces the module's kubelet config (graceful shutdown included); set services.k3s.extraKubeletConfig instead.";
+        assertion =
+          builtins.match ".*--kubelet-arg[= ]+\"?(--)?config=.*" (toString cfg.extraFlags) == null;
+        message = "ethpandaops.k3s.extraFlags sets the kubelet's config file (--kubelet-arg config=), which replaces the module's kubelet config (graceful shutdown included); set services.k3s.extraKubeletConfig instead.";
       }
     ];
 
