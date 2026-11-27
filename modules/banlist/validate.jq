@@ -19,6 +19,10 @@ elif (.mode | IN("enforce", "shadow", "empty") | not) then fail("invalid"; "unkn
 elif (.entries | type) != "array" then fail("invalid"; "entries isn't a list")
 elif .generated_at < $now - 600 then fail("stale"; "generation \(.generation) was signed \($now - .generated_at)s ago")
 elif .generated_at > $now + 300 then fail("stale"; "generation \(.generation) is signed \(.generated_at - $now)s in the future")
+# A generation far ahead would hold every later list back as a replay. jq
+# compares the literals exactly, so nothing above 2^53 reaches bash.
+elif .generation > 9007199254740992 then fail("invalid"; "generation \(.generation) is above 2^53")
+elif .generation > .generated_at + 86400 then fail("invalid"; "generation \(.generation) is more than a day ahead of its signing time, \(.generated_at)")
 elif .mode == "empty" and (.entries | length) > 0 then fail("invalid"; "mode empty, with entries")
 elif (.entries | length) > 5000 then fail("too_many"; "\(.entries | length) entries, more than 5000")
 else
@@ -32,10 +36,12 @@ else
     elif $v4 > 1048576 then fail("coverage"; "covers \($v4) IPv4 addresses, more than 2^20")
     elif $v6 > 1048576 then fail("coverage"; "covers \($v6) IPv6 /64s, more than 2^20")
     else {
-      generation,
-      previous: (.previous_generation // 0),
-      generated_at,
+      # floor: whole numbers written as 1.7e9 or 1700000000.0 come out as
+      # 1700000000, which bash compares.
+      generation: (.generation | floor),
+      previous: ((.previous_generation // 0) | floor),
+      generated_at: (.generated_at | floor),
       mode,
-      entries: [$ok[] | select(.expires > $now) | {family, cidr, timeout: ([.expires - $now, 2147483] | min)}]
+      entries: [$ok[] | select(.expires > $now) | {family, cidr, timeout: ([.expires - $now, 2147483] | min | floor)}]
     } end
 end

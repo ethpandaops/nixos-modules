@@ -19,15 +19,18 @@
 #   addresses), and loads it only if: ssh-keygen -Y verify accepts its
 #   signature by one of publicKeys (namespace nixhost-banlist); it's version
 #   1, generated within the last 10 minutes and not more than 5 minutes ahead;
-#   its generation isn't older than one this host loaded (kept across
-#   reboots); no entry is wider than /24 (IPv4) or /48 (IPv6); it has at most
-#   5000 entries and covers at most 2^20 IPv4 addresses and 2^20 IPv6 /64s;
-#   and, when it follows the generation this host has loaded, it adds at most
-#   500 entries (not checked on the puller's first load, or when nothing is
-#   dropped). Otherwise it keeps what it has. Each entry's ipset timeout is
-#   its expiry, so a host that can't reach the list stops blocking on its own
-#   as entries expire. A list in mode "shadow", or a host in mode shadow,
-#   fills the shadow sets; a list in mode "empty" empties both.
+#   its generation is at most 2^53, at most a day ahead of its signing time,
+#   and not older than one this host loaded from the same key (kept across
+#   reboots, per key, so switching to the standby key recovers from a
+#   generation pushed ahead under the other); no entry is wider than /24
+#   (IPv4) or /48 (IPv6); it has at most 5000 entries and covers at most 2^20
+#   IPv4 addresses and 2^20 IPv6 /64s; and, when it follows the generation
+#   this host has loaded, it adds at most 500 entries (not checked on the
+#   puller's first load, or when nothing is dropped). Otherwise it keeps what
+#   it has. Each entry's ipset timeout is its expiry, so a host that can't
+#   reach the list stops blocking on its own as entries expire. A list in mode
+#   "shadow", or a host in mode shadow, fills the shadow sets; a list in mode
+#   "empty" empties both.
 #
 # Nothing here names a host, address or range of ours: the list's URL and
 # credentials default to the host's log shipping ones (monitoring.logs). Our
@@ -44,7 +47,8 @@
 # list at its source.
 #
 # Metrics (nixhost_banlist.prom): nixhost_banlist_info{mode,list_mode,
-# effective}, nixhost_banlist_ready (the chain is in place), _generation,
+# effective,key} (key: the fingerprint that signed the loaded list),
+# nixhost_banlist_ready (the chain is in place), _generation,
 # _generated_timestamp_seconds, _last_success_timestamp_seconds,
 # _entries{family,set}, _rejected_total{reason} and
 # _matched_packets_total{family,set} (new-connection packets each set
@@ -159,11 +163,14 @@ in
       type = lib.types.listOf lib.types.str;
       default = [
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkPzuHMvZeH/FTawSYfiPv/4hTBSpy0279V0zXh8xdH nixhost-banlist"
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAgrKryEmCcI6FvMIwiLF53OobqY+HTCgS3CGfhB4Cj3 nixhost-banlist-standby"
       ];
       description = ''
         The keys the list may be signed with (ssh-keygen -Y sign -n
-        nixhost-banlist). To rotate, add the new key, let every host pick it
-        up, sign with it, then remove the old one.
+        nixhost-banlist): the active key and a standby, whose private half
+        is kept apart. To rotate: sign with the standby (hosts accept it
+        already, and its replay floor is its own), pin a new standby, let
+        every host pick it up, then remove the old key.
       '';
     };
     allow = lib.mkOption {
@@ -200,103 +207,110 @@ in
     };
   };
 
-  config = lib.mkIf (cfg.mode != "off") {
-    assertions = [
-      {
-        assertion = cfg.url != null && cfg.user != null && cfg.passwordFile != null;
-        message = "ethpandaops.banlist needs url, user and passwordFile (by default monitoring.logs').";
-      }
-      {
-        assertion = cfg.publicKeys != [ ];
-        message = "ethpandaops.banlist.publicKeys is empty: no list could be verified.";
-      }
-      {
-        assertion = invalid == [ ];
-        message = "ethpandaops.banlist: not an address or CIDR: ${lib.concatStringsSep ", " invalid}";
-      }
-      {
-        assertion = config.networking.firewall.enable && !config.networking.nftables.enable;
-        message = "ethpandaops.banlist needs the NixOS iptables firewall.";
-      }
-    ];
+  config = lib.mkMerge [
+    # Mode off leaves no metrics behind from when it was on.
+    (lib.mkIf (cfg.mode == "off") {
+      systemd.tmpfiles.rules = [ "r ${config.ethpandaops.metrics.textfileDir}/nixhost_banlist.prom" ];
+    })
 
-    # Loaded at boot, so they're there under security.lockKernelModules.
-    boot.kernelModules = [
-      "ip_set"
-      "ip_set_hash_net"
-      "xt_set"
-    ];
-
-    environment.systemPackages = [ pkgs.ipset ];
-
-    systemd.services.nixhost-banlist-sets = {
-      description = "Fleet ban list: ipsets and the nixos-ban chain";
-      wantedBy = [ "sysinit.target" ];
-      wants = [ "network-pre.target" ];
-      after = [ "systemd-modules-load.service" ];
-      before = [
-        "network-pre.target"
-        "firewall.service"
-        "shutdown.target"
+    (lib.mkIf (cfg.mode != "off") {
+      assertions = [
+        {
+          assertion = cfg.url != null && cfg.user != null && cfg.passwordFile != null;
+          message = "ethpandaops.banlist needs url, user and passwordFile (by default monitoring.logs').";
+        }
+        {
+          assertion = cfg.publicKeys != [ ];
+          message = "ethpandaops.banlist.publicKeys is empty: no list could be verified.";
+        }
+        {
+          assertion = invalid == [ ];
+          message = "ethpandaops.banlist: not an address or CIDR: ${lib.concatStringsSep ", " invalid}";
+        }
+        {
+          assertion = config.networking.firewall.enable && !config.networking.nftables.enable;
+          message = "ethpandaops.banlist needs the NixOS iptables firewall.";
+        }
       ];
-      conflicts = [ "shutdown.target" ];
-      unitConfig.DefaultDependencies = false;
-      # Restarted, not stopped and started, on a change, so the puller
-      # (PartOf) restarts with it.
-      stopIfChanged = false;
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = "${lib.getExe sets} start";
-        ExecStop = "${lib.getExe sets} stop";
-      };
-    };
 
-    systemd.services.nixhost-banlist-pull = {
-      description = "Fleet ban list: fetch, check and load the signed list";
-      wantedBy = [ "multi-user.target" ];
-      wants = [
-        "network-online.target"
-        "nixhost-banlist-sets.service"
+      # Loaded at boot, so they're there under security.lockKernelModules.
+      boot.kernelModules = [
+        "ip_set"
+        "ip_set_hash_net"
+        "xt_set"
       ];
-      after = [
-        "network-online.target"
-        "nixhost-banlist-sets.service"
-      ];
-      partOf = [ "nixhost-banlist-sets.service" ];
-      environment = {
-        URL = cfg.url;
-        USER_NAME = cfg.user;
-        PASSWORD_FILE = cfg.passwordFile;
-        SIGNERS = "${signers}";
-        MODE = cfg.mode;
-        INTERVAL = toString cfg.interval;
-        IPV6 = if ipv6 then "1" else "";
-      };
-      startLimitIntervalSec = 0;
-      serviceConfig = {
-        ExecStart = lib.getExe pull;
-        Restart = "always";
-        RestartSec = 30;
-        StateDirectory = "nixhost-banlist";
-        StateDirectoryMode = "0700";
-        RuntimeDirectory = "nixhost-banlist";
-        RuntimeDirectoryMode = "0700";
-        CapabilityBoundingSet = [
-          "CAP_NET_ADMIN"
-          "CAP_NET_RAW"
+
+      environment.systemPackages = [ pkgs.ipset ];
+
+      systemd.services.nixhost-banlist-sets = {
+        description = "Fleet ban list: ipsets and the nixos-ban chain";
+        wantedBy = [ "sysinit.target" ];
+        wants = [ "network-pre.target" ];
+        after = [ "systemd-modules-load.service" ];
+        before = [
+          "network-pre.target"
+          "firewall.service"
+          "shutdown.target"
         ];
-        NoNewPrivileges = true;
-        PrivateTmp = true;
-        ProtectHome = true;
-        ProtectSystem = "full";
-        RestrictAddressFamilies = [
-          "AF_UNIX"
-          "AF_INET"
-          "AF_INET6"
-          "AF_NETLINK"
-        ];
+        conflicts = [ "shutdown.target" ];
+        unitConfig.DefaultDependencies = false;
+        # Restarted, not stopped and started, on a change, so the puller
+        # (PartOf) restarts with it.
+        stopIfChanged = false;
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${lib.getExe sets} start";
+          ExecStop = "${lib.getExe sets} stop";
+        };
       };
-    };
-  };
+
+      systemd.services.nixhost-banlist-pull = {
+        description = "Fleet ban list: fetch, check and load the signed list";
+        wantedBy = [ "multi-user.target" ];
+        wants = [
+          "network-online.target"
+          "nixhost-banlist-sets.service"
+        ];
+        after = [
+          "network-online.target"
+          "nixhost-banlist-sets.service"
+        ];
+        partOf = [ "nixhost-banlist-sets.service" ];
+        environment = {
+          URL = cfg.url;
+          USER_NAME = cfg.user;
+          PASSWORD_FILE = cfg.passwordFile;
+          SIGNERS = "${signers}";
+          MODE = cfg.mode;
+          INTERVAL = toString cfg.interval;
+          IPV6 = if ipv6 then "1" else "";
+        };
+        startLimitIntervalSec = 0;
+        serviceConfig = {
+          ExecStart = lib.getExe pull;
+          Restart = "always";
+          RestartSec = 30;
+          StateDirectory = "nixhost-banlist";
+          StateDirectoryMode = "0700";
+          RuntimeDirectory = "nixhost-banlist";
+          RuntimeDirectoryMode = "0700";
+          CapabilityBoundingSet = [
+            "CAP_NET_ADMIN"
+            "CAP_NET_RAW"
+          ];
+          NoNewPrivileges = true;
+          PrivateTmp = true;
+          ProtectHome = true;
+          ProtectSystem = "full";
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_INET"
+            "AF_INET6"
+            "AF_NETLINK"
+          ];
+        };
+      };
+    })
+  ];
 }

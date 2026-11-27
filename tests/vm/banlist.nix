@@ -1,12 +1,15 @@
 # The fleet ban list end to end: a dual-stack host fetches a signed list
-# over IPv4 and IPv6 in turn and loads it, in shadow counts and drops nothing, enforcing drops new connections from the list's
-# sources except allowed ones, refuses a list that's too wide, badly signed,
-# stale, replayed or a flood and keeps the last good one, follows the list's
-# own shadow and empty modes, and comes out with break-glass or mode off; the
-# rules never change while lists load. A box whose module lock came on
-# before the ban list's kernel modules loaded keeps its firewall and drops
-# nothing. And sshd's "Invalid user" line ends with the real source, so a
-# scorer reads the address from the end, not after the first " from ".
+# over IPv4 and IPv6 in turn and loads it, in shadow counts and drops
+# nothing, enforcing drops new connections from the list's sources except
+# allowed ones, refuses a list that's too wide, badly signed, stale,
+# replayed, a flood, or whose generation is huge or far ahead, and keeps the
+# last good one; a list signed by the standby key isn't held back by the
+# active key's replay floor; it follows the list's own shadow and empty
+# modes, and comes out with break-glass or mode off; the rules never change
+# while lists load. A box whose module lock came on before the ban list's
+# kernel modules loaded keeps its firewall and drops nothing. And sshd's
+# "Invalid user" line ends with the real source, so a scorer reads the
+# address from the end, not after the first " from ".
 {
   self,
   pkgs,
@@ -45,7 +48,11 @@ let
       url = "http://client:8080/banlist/v1";
       user = "test";
       passwordFile = "${pkgs.writeText "banlist-password" "secret"}";
-      publicKeys = [ keys.snakeOilEd25519PublicKey ];
+      # Active and standby.
+      publicKeys = [
+        keys.snakeOilEd25519PublicKey
+        keys.snakeOilPublicKey
+      ];
       # The default allows private ranges, the test network's among them.
       allow = [ "127.0.0.0/8" ];
       interval = 2;
@@ -172,6 +179,9 @@ in
       start_all()
       client.wait_for_unit("list-server.service")
       client.succeed("install -m 600 ${keys.snakeOilEd25519PrivateKey} /root/key")
+      client.succeed("install -m 600 ${keys.snakeOilPrivateKey} /root/standby")
+      client.succeed("echo '${keys.snakeOilEd25519PublicKey}' > /root/key.pub; echo '${keys.snakeOilPublicKey}' > /root/standby.pub")
+      active, standby = (client.succeed(f"ssh-keygen -lf {k}.pub | cut -d' ' -f2").strip() for k in ["/root/key", "/root/standby"])
       client.succeed('ssh-keygen -q -t ed25519 -N "" -f /root/other')
       server.wait_for_unit("probe.service")
       server.wait_for_unit("nixhost-banlist-pull.service")
@@ -199,7 +209,7 @@ in
           wait_value('nixhost_banlist_entries{family="ipv6",set="shadow"}', 1)
           wait_value('nixhost_banlist_entries{family="ipv4",set="ban"}', 0)
           retry(lambda _: value('nixhost_banlist_matched_packets_total{family="ipv4",set="shadow"}') > 0, timeout_seconds=60)
-          assert 'nixhost_banlist_info{mode="shadow",list_mode="enforce",effective="shadow"} 1' in metrics()
+          assert f'nixhost_banlist_info{{mode="shadow",list_mode="enforce",effective="shadow",key="{active}"}} 1' in metrics()
 
       with subtest("enforcing drops new connections from the list's sources, never from allowed ones"):
           publish([scanner4 + "/32", client4 + "/32", net6], 1001)
@@ -253,8 +263,37 @@ in
           assert not reaches(scanner, 4)
           assert mangle() == rules, (rules, mangle())
 
-      with subtest("mode off takes the chain out"):
+      with subtest("a generation above 2^53 or over a day ahead is refused; the standby key has its own replay floor"):
+          loaded = 1030
+          now = int(client.succeed("date +%s"))
+          # 2^64 - 1 is past bash's integers, which once let it through.
+          refused("invalid", [], 2**64 - 1, 1030)
+          refused("invalid", [], 2**53 + 1, 1030)
+          refused("invalid", [], now + 2 * 86400, 1030)
+          # Up to a day ahead loads, and holds the active key's lists back.
+          ahead = now + 3600
+          publish([scanner4 + "/32"], ahead, 1030)
+          wait_value("nixhost_banlist_generation", ahead)
+          loaded = ahead
+          refused("replay", [], now, ahead)
+          # The same older generation written as a float is still a replay,
+          # not a comparison bash gives up on.
+          refused("replay", [], float(now), ahead)
+          # The standby key isn't held back: rotating to it recovers.
+          publish([], now, ahead, key="/root/standby")
+          wait_value("nixhost_banlist_generation", now)
+          loaded = now
+          assert reaches(scanner, 4)
+          assert f'key="{standby}"' in metrics(), metrics()
+          refused("replay", [scanner4 + "/32"], now - 1, now, key="/root/standby")
+          # Each floor is kept on disk, for the next boot.
+          floors = server.succeed("grep -r . /var/lib/nixhost-banlist | sort")
+          assert f"generation-{active.replace('/', '_')}:{ahead}" in floors, floors
+          assert f"generation-{standby.replace('/', '_')}:{now}" in floors, floors
+
+      with subtest("mode off takes the chain and the metrics out"):
           switch("off")
+          server.fail("test -e /var/lib/node-exporter/nixhost_banlist.prom")
           server.fail("iptables -w -t mangle -S nixos-ban")
           server.fail("ip6tables -w -t mangle -S nixos-ban")
           assert reaches(scanner, 4) and reaches(scanner, 6)

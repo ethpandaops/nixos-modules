@@ -9,6 +9,7 @@ families=(4)
 if [ -n "$IPV6" ]; then families+=(6); fi
 
 loaded=""       # the generation this process loaded; "" until its first load
+loaded_key=""   # the fingerprint of the key that signed it
 list_mode=""    # that list's mode
 effective=""    # what's in force: enforce, shadow or empty
 generated_at=0  # the newest signing time seen for the loaded generation
@@ -85,7 +86,7 @@ load() {
 # pull: 0 if the fetched list is loaded or is the loaded one; otherwise 1
 # with reason and detail set.
 pull() {
-  local now code gen prev at new_mode persisted want added
+  local now code gen prev at new_mode persisted want added verified key floor
   local -a family=()
   now=$(date +%s)
   rm -f "$work/envelope" "$work/payload" "$work/payload.sig" "$work/list"
@@ -110,11 +111,17 @@ pull() {
     fail invalid "not a payload and signature"
     return 1
   fi
-  if ! ssh-keygen -Y verify -f "$SIGNERS" -I nixhost-banlist -n nixhost-banlist \
-    -s "$work/payload.sig" <"$work/payload" >/dev/null 2>&1; then
+  if ! verified=$(ssh-keygen -Y verify -f "$SIGNERS" -I nixhost-banlist -n nixhost-banlist \
+    -s "$work/payload.sig" <"$work/payload" 2>&1); then
     fail signature "not signed by any of publicKeys"
     return 1
   fi
+  # Good "nixhost-banlist" signature for nixhost-banlist with ED25519 key SHA256:...
+  if [[ ! $verified =~ key\ (SHA256:[A-Za-z0-9+/=]+) ]]; then
+    fail signature "verified, but ssh-keygen named no key: $(head -c 200 <<<"$verified")"
+    return 1
+  fi
+  key=${BASH_REMATCH[1]}
   if ! jq -c --argjson now "$now" -f "$VALIDATE" "$work/payload" >"$work/list" 2>/dev/null; then
     fail invalid "not JSON"
     return 1
@@ -124,14 +131,27 @@ pull() {
     return 1
   fi
   read -r gen prev at new_mode < <(jq -r '[.generation, .previous, .generated_at, .mode] | @tsv' "$work/list")
-
-  persisted=$(cat "$STATE_DIRECTORY/generation" 2>/dev/null || echo 0)
-  if [ "$gen" -lt "$persisted" ]; then
-    fail replay "generation $gen is older than $persisted, which this host loaded"
+  # validate.jq prints these as integers up to 2^53; bash's [ -lt ] skips a
+  # replay check it can't parse, so anything else stops here.
+  if ! [[ $gen =~ ^[0-9]{1,16}$ && $prev =~ ^[0-9]{1,16}$ && $at =~ ^[0-9]{1,16}$ ]]; then
+    fail invalid "generation $gen, previous $prev or generated_at $at isn't a plain integer"
     return 1
   fi
-  # The same generation, signed again: the same entries, so only fresher.
-  if [ "$gen" = "$loaded" ]; then
+
+  # The replay floor is per signing key, so a list from the standby key
+  # isn't held back by a generation pushed ahead under the other. validate.jq
+  # keeps generations at or below 2^53, and only those are written here, so
+  # bash's 64-bit comparison is safe.
+  floor="$STATE_DIRECTORY/generation-${key//\//_}"
+  persisted=$(cat "$floor" 2>/dev/null || echo 0)
+  [[ $persisted =~ ^[0-9]{1,16}$ ]] || persisted=0
+  if [ "$gen" -lt "$persisted" ]; then
+    fail replay "generation $gen is older than $persisted, which this host loaded from $key"
+    return 1
+  fi
+  # The same generation, signed again by the same key: the same entries, so
+  # only fresher.
+  if [ "$gen" = "$loaded" ] && [ "$key" = "$loaded_key" ]; then
     if [ "$at" -gt "$generated_at" ]; then generated_at=$at; fi
     last_success=$now
     return 0
@@ -151,9 +171,9 @@ pull() {
 
   load "$want" "$work/list" || return 1
   jq -r '.entries[].cidr' "$work/list" | sort -u >"$work/loaded-cidrs"
-  echo "$gen" >"$STATE_DIRECTORY/generation.new" && mv -f "$STATE_DIRECTORY/generation.new" "$STATE_DIRECTORY/generation"
-  echo "loaded generation $gen ($new_mode list, $want here): $(jq '.entries | length' "$work/list") entries"
-  loaded=$gen list_mode=$new_mode effective=$want generated_at=$at last_success=$now
+  echo "$gen" >"$floor.new" && mv -f "$floor.new" "$floor"
+  echo "loaded generation $gen ($new_mode list, $want here, signed by $key): $(jq '.entries | length' "$work/list") entries"
+  loaded=$gen loaded_key=$key list_mode=$new_mode effective=$want generated_at=$at last_success=$now
 }
 
 metrics() {
@@ -163,9 +183,9 @@ metrics() {
     [ "$n" = 6 ] && ipt=ip6tables
     "$ipt" -w -t mangle -C PREROUTING -j nixos-ban 2>/dev/null || ready=0
   done
-  echo "# HELP nixhost_banlist_info The configured mode, the loaded list's mode, and what's in force."
+  echo "# HELP nixhost_banlist_info The configured mode, the loaded list's mode, what's in force, and the key that signed it."
   echo "# TYPE nixhost_banlist_info gauge"
-  echo "nixhost_banlist_info{mode=\"$MODE\",list_mode=\"$list_mode\",effective=\"$effective\"} 1"
+  echo "nixhost_banlist_info{mode=\"$MODE\",list_mode=\"$list_mode\",effective=\"$effective\",key=\"$loaded_key\"} 1"
   echo "# HELP nixhost_banlist_ready Whether the nixos-ban chain is in place for every address family."
   echo "# TYPE nixhost_banlist_ready gauge"
   echo "nixhost_banlist_ready $ready"
@@ -202,6 +222,9 @@ metrics() {
 }
 
 touch "$work/loaded-cidrs"
+# The floor before it was kept per key; the 600 s freshness check covers the
+# one pull without it.
+rm -f "$STATE_DIRECTORY/generation"
 while true; do
   if pull; then
     if [ -n "$last_reason" ]; then
