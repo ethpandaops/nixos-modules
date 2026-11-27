@@ -121,9 +121,20 @@ in
         "agent has no etcd guard" = !guarded agent;
         "agent has no pre-minor snapshot" = !(agent.systemd.services ? k3s-pre-minor-snapshot);
         "agent's switch inhibitors" = inhibitors agent == [ "k3s-version" ];
-        "agent's rollback guard" = lib.attrNames agent.ethpandaops.rollback.guard == [ "k3s-version" ];
+        "agent's rollback guard" = lib.attrNames agent.ethpandaops.rollback.guard == [ "k3s-minor" ];
         "agent's k3s checks are outside health checks" =
-          agent.ethpandaops.checks.k3s.kind == "health" && agent.ethpandaops.checks.kubelet.outside;
+          lib.all (c: agent.ethpandaops.checks.${c}.kind == "health" && agent.ethpandaops.checks.${c}.outside)
+            [
+              "k3s"
+              "kubelet"
+            ];
+        "server's k3s checks are readiness checks" =
+          lib.all
+            (c: first.ethpandaops.checks.${c}.kind == "readiness" && !first.ethpandaops.checks.${c}.outside)
+            [
+              "k3s"
+              "kubelet"
+            ];
         "first server starts etcd" = lib.hasInfix "--cluster-init" (execStart first);
         "first server has the etcd guard" = guarded first;
         "first server waits for a reboot" = !first.systemd.services.k3s.restartIfChanged;
@@ -140,7 +151,36 @@ in
         "joining server's snapshot inhibitor is off" =
           joining.system.switch.inhibitors.k3s-server-snapshots == "off";
       };
-      failed = lib.attrNames (lib.filterAttrs (_: ok: !ok) results);
+      # Settings the module refuses, each by the start of its message.
+      refusals = {
+        "ethpandaops.k3s.serverAddr is required" = node { role = "agent"; };
+        "ethpandaops.k3s.tokenFile is required" = node {
+          role = "agent";
+          serverAddr = "https://192.0.2.1:6443";
+        };
+        "ethpandaops.k3s.dataDir is" =
+          (server.extendModules {
+            modules = [
+              self.nixosModules.k3s
+              {
+                ethpandaops.k3s = {
+                  package = pkgs.k3s;
+                  role = "server";
+                  dataDir = "/srv/k3s";
+                };
+                services.k3s.manifests.example.content = { };
+              }
+            ];
+          }).config;
+        "ethpandaops.k3s.extraFlags has --kubelet-arg=config=" = node {
+          role = "server";
+          extraFlags = [ "--kubelet-arg=config=/etc/kubelet.yaml" ];
+        };
+      };
+      refused = message: c: lib.any (a: !a.assertion && lib.hasPrefix message a.message) c.assertions;
+      failed =
+        lib.attrNames (lib.filterAttrs (_: ok: !ok) results)
+        ++ map (m: "accepted: ${m}") (lib.attrNames (lib.filterAttrs (m: c: !refused m c) refusals));
     in
     pkgs.runCommand "k3s-roles" { failed = lib.concatStringsSep "; " failed; } ''
       if [ -n "$failed" ]; then

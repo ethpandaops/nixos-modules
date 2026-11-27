@@ -1,8 +1,9 @@
-# The k3s module on a single server with no network (its one image is
-# preloaded), its data in a non-default data dir, snapshotting to a local
+# The k3s module on a single server with no network, its data in a
+# non-default data dir, snapshotting to a local
 # S3 server (rclone) over TLS with the endpoint and keys from sops: the etcd guard refuses an empty
 # data dir until the bootstrap file is there and removes that file once etcd
-# is up, scheduled and on-demand snapshots reach the bucket, the checks pass
+# is up, scheduled snapshots and the one before a reboot into another k3s
+# minor reach the bucket, the checks pass
 # through the kubelet's credentials, and logind lets the kubelet hold its
 # shutdown delay.
 {
@@ -43,24 +44,10 @@ let
           -keyout $out/s3.key -out $out/s3.crt
       '';
 
-  image = pkgs.dockerTools.buildLayeredImage {
-    name = "test.local/pause";
-    tag = "local";
-    contents = pkgs.buildEnv {
-      name = "nixhost-test-image";
-      paths = [
-        pkgs.tini
-        (lib.hiPrio pkgs.coreutils)
-        pkgs.busybox
-      ];
-    };
-    config.Entrypoint = [
-      "/bin/tini"
-      "--"
-      "/bin/sleep"
-      "inf"
-    ];
-  };
+  # Systems the bootloader could boot next, for the pre-minor snapshot.
+  nextSystem = version: pkgs.writeTextDir "etc/nixhost/k3s-version" version;
+  sameMinor = nextSystem pkgs.k3s.version;
+  otherMinor = nextSystem "0.1.0";
 in
 {
   name = "k3s";
@@ -80,7 +67,6 @@ in
         role = "server";
         inherit dataDir bootstrapFile;
         labels."example.com/pool" = "test";
-        extraFlags = [ "--pause-image=test.local/pause:local" ];
         gracefulShutdown.period = 45;
         etcdSnapshots = {
           enable = true;
@@ -89,16 +75,17 @@ in
           folder = "test-cluster";
         };
       };
-      services.k3s = {
-        disable = [
-          "coredns"
-          "local-storage"
-          "metrics-server"
-          "servicelb"
-          "traefik"
-        ];
-        images = [ image ];
-      };
+      services.k3s.disable = [
+        "coredns"
+        "local-storage"
+        "metrics-server"
+        "servicelb"
+        "traefik"
+      ];
+      system.extraDependencies = [
+        sameMinor
+        otherMinor
+      ];
       environment.systemPackages = [
         pkgs.jq
         pkgs.kubectl
@@ -181,12 +168,23 @@ in
         machine.wait_until_succeeds("systemd-inhibit --list --mode=delay --no-pager | grep -q kubelet", timeout=120)
         machine.succeed("test ! -e /etc/systemd/logind.conf.d/99-kubelet.conf")
 
-    with subtest("snapshots reach the bucket: on schedule, and on demand as the pre-minor snapshot takes them"):
+    with subtest("scheduled snapshots reach the bucket"):
         assert "etcd-s3-endpoint: \"s3.test:9000\"" in sh("cat /etc/rancher/k3s/config.yaml.d/etcd-snapshots.yaml")
         machine.wait_until_succeeds(f"ls {bucket} | grep -q '^etcd-snapshot-machine-'", timeout=180)
-        machine.succeed("k3s etcd-snapshot save --data-dir ${dataDir} --name pre-minor-upgrade")
-        machine.succeed(f"ls {bucket} | grep -q '^pre-minor-upgrade-machine-'")
-        machine.succeed("systemctl is-active k3s-pre-minor-snapshot.service")
+
+    with subtest("shutting down for a reboot into another k3s minor snapshots etcd; into the same minor, it doesn't"):
+        def pre_minor():
+            return int(sh(f"ls {bucket} | grep -c '^pre-minor-upgrade-machine-' || true"))
+
+        def reboot_into(system):
+            machine.succeed(f"mkdir -p /boot/grub && echo 'linux /kernel init={system}/init' > /boot/grub/grub.cfg")
+            machine.succeed("systemctl stop k3s-pre-minor-snapshot.service")
+            machine.succeed("systemctl start k3s-pre-minor-snapshot.service")
+
+        reboot_into("${sameMinor}")
+        assert pre_minor() == 0
+        reboot_into("${otherMinor}")
+        assert pre_minor() == 1
 
     with subtest("turning snapshots off removes the drop-in, and k3s still starts"):
         # The snapshot inhibitor changes, so the switch needs NIXOS_NO_CHECK.
@@ -195,9 +193,9 @@ in
         machine.succeed("systemctl restart k3s.service")
         machine.wait_for_unit("k3s.service")
 
-    with subtest("a k3s version is never rolled back, nor the server's data dir"):
+    with subtest("a k3s minor is never rolled back, nor the server's data dir"):
         guard = json.loads(sh("cat /etc/nixhost/rollback-guard.json"))
-        assert guard == {"k3s-version": "${pkgs.k3s.version}", "k3s-data-dir": "${dataDir}"}, guard
+        assert guard == {"k3s-minor": "${lib.versions.majorMinor pkgs.k3s.version}", "k3s-data-dir": "${dataDir}"}, guard
         assert sh("cat /etc/nixhost/k3s-version") == "${pkgs.k3s.version}"
 
     with subtest("losing etcd later doesn't start a new cluster"):

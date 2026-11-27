@@ -9,21 +9,31 @@
 }:
 let
   cfg = config.ethpandaops.k3s;
+  k3s = config.services.k3s;
   isServer = cfg.role == "server";
   initsEtcd = isServer && cfg.serverAddr == null;
   snapshots = isServer && cfg.etcdSnapshots.enable;
   defaultDataDir = "/var/lib/rancher/k3s";
+  arg = lib.escapeShellArg;
 
   etcdGuard = pkgs.writeShellScript "k3s-etcd-guard" ''
-    if [ ! -d ${cfg.dataDir}/server/db/etcd/member ] && [ ! -e ${cfg.bootstrapFile} ]; then
-      echo "${cfg.dataDir} has no etcd member: not starting a new cluster. To start one: install -D /dev/null ${cfg.bootstrapFile}" >&2
+    data=${arg cfg.dataDir}
+    bootstrap=${arg cfg.bootstrapFile}
+    if [ ! -d "$data/server/db/etcd/member" ] && [ ! -e "$bootstrap" ]; then
+      {
+        echo "$data has no etcd member: not starting a new cluster."
+        echo "Check that $data is mounted."
+        echo "To recover, restore a snapshot (k3s server --cluster-reset --cluster-reset-restore-path=<snapshot>), or rejoin through serverAddr if other servers exist."
+        echo "Only for a brand-new cluster: install -D /dev/null $bootstrap"
+      } >&2
       exit 1
     fi
   '';
   bootstrapCleanup = pkgs.writeShellScript "k3s-bootstrap-cleanup" ''
-    if [ -e ${cfg.bootstrapFile} ] && [ -d ${cfg.dataDir}/server/db/etcd/member ]; then
-      rm -f ${cfg.bootstrapFile}
-      echo "etcd is up; removed ${cfg.bootstrapFile}"
+    bootstrap=${arg cfg.bootstrapFile}
+    if [ -e "$bootstrap" ] && [ -d ${arg cfg.dataDir}/server/db/etcd/member ]; then
+      rm -f "$bootstrap"
+      echo "etcd is up; removed $bootstrap"
     fi
     exit 0
   '';
@@ -41,12 +51,11 @@ let
       minor() { cut -d. -f1-2 "$1/etc/nixhost/k3s-version" 2>/dev/null || echo unknown; }
       next=$(boot_default || true)
       if [ -n "$next" ] && [ "$(minor "$next")" != "$(minor /run/current-system)" ]; then
-        ${cfg.package}/bin/k3s etcd-snapshot save --data-dir ${cfg.dataDir} --name pre-minor-upgrade
+        ${cfg.package}/bin/k3s etcd-snapshot save --data-dir ${arg cfg.dataDir} --name pre-minor-upgrade
       fi
     '';
   };
 
-  snapshotDropIn = "/etc/rancher/k3s/config.yaml.d/etcd-snapshots.yaml";
   snapshotSettings = {
     inherit (cfg.etcdSnapshots)
       schedule
@@ -104,20 +113,21 @@ in
       description = "The server to register with: required on an agent; on a server, joins that server's etcd cluster instead of starting one.";
     };
     tokenFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
+      type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "k3s --token-file: the cluster's token, required to join. A server that starts a cluster without one generates it.";
+      example = "/run/secrets/k3s-token";
+      description = "k3s --token-file: a path on the node (not a Nix path, which would put the token in the store), required with serverAddr. A server that starts a cluster without one generates it.";
     };
     dataDir = lib.mkOption {
       type = lib.types.str;
       default = defaultDataDir;
-      description = "k3s --data-dir.";
+      description = "k3s --data-dir. k3s waits for it to be mounted. nixpkgs writes services.k3s.images, manifests, charts, autoDeployCharts and containerdConfigTemplate under the default only, so they can't be used with another.";
     };
     extraFlags = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
       example = [ "--flannel-backend=none" ];
-      description = "More k3s flags, after the ones the other options set.";
+      description = "More k3s flags, after the ones the other options set. Kubelet settings go in services.k3s.extraKubeletConfig: a --kubelet-arg=config= here would replace the module's kubelet config.";
     };
     bootstrapFile = lib.mkOption {
       type = lib.types.str;
@@ -170,6 +180,30 @@ in
         assertion = cfg.gracefulShutdown.criticalPods < cfg.gracefulShutdown.period;
         message = "ethpandaops.k3s.gracefulShutdown.criticalPods must be less than its period.";
       }
+      {
+        assertion = isServer || cfg.serverAddr != null;
+        message = "ethpandaops.k3s.serverAddr is required on an agent.";
+      }
+      {
+        assertion = cfg.serverAddr == null || cfg.tokenFile != null;
+        message = "ethpandaops.k3s.tokenFile is required with serverAddr: a node can't join without the cluster's token.";
+      }
+      {
+        assertion =
+          cfg.dataDir == defaultDataDir
+          || (
+            k3s.images == [ ]
+            && k3s.manifests == { }
+            && k3s.charts == { }
+            && k3s.autoDeployCharts == { }
+            && k3s.containerdConfigTemplate == null
+          );
+        message = "ethpandaops.k3s.dataDir is ${cfg.dataDir}, but nixpkgs writes services.k3s.images, manifests, charts, autoDeployCharts and containerdConfigTemplate under ${defaultDataDir}, where this k3s never reads them. Leave them unset or keep the default data dir.";
+      }
+      {
+        assertion = !lib.any (lib.hasPrefix "--kubelet-arg=config=") cfg.extraFlags;
+        message = "ethpandaops.k3s.extraFlags has --kubelet-arg=config=, which replaces the module's kubelet config (graceful shutdown included); set services.k3s.extraKubeletConfig instead.";
+      }
     ];
 
     services.k3s = {
@@ -192,6 +226,7 @@ in
     };
 
     systemd.services.k3s = {
+      unitConfig.RequiresMountsFor = [ cfg.dataDir ];
       serviceConfig = lib.mkIf initsEtcd {
         ExecStartPre = [ etcdGuard ];
         ExecStartPost = [ bootstrapCleanup ];
@@ -213,8 +248,9 @@ in
         if snapshots then builtins.hashString "sha256" (builtins.toJSON snapshotSettings) else "off";
     };
 
+    # Patch releases keep the datastore format, so only a minor holds.
     ethpandaops.rollback.guard = {
-      k3s-version = cfg.package.version;
+      k3s-minor = lib.versions.majorMinor cfg.package.version;
     }
     // lib.optionalAttrs isServer {
       k3s-data-dir = cfg.dataDir;
@@ -244,7 +280,6 @@ in
       etcd-s3-secret-key = { };
     };
     sops.templates."k3s-etcd-snapshots.yaml" = lib.mkIf snapshots {
-      path = snapshotDropIn;
       content = ''
         etcd-snapshot-schedule-cron: "${cfg.etcdSnapshots.schedule}"
         etcd-snapshot-retention: ${toString cfg.etcdSnapshots.retention}
@@ -261,14 +296,18 @@ in
       '';
     };
 
-    # sops-nix leaves a dropped template's symlink behind, dangling, and k3s
-    # fails on an unreadable drop-in.
-    systemd.tmpfiles.rules = lib.mkIf (!snapshots) [ "r ${snapshotDropIn}" ];
+    # NixOS, not sops-nix, owns the link, so it goes when snapshots are off:
+    # sops-nix leaves a dropped template's link dangling, and k3s fails on
+    # an unreadable drop-in.
+    environment.etc."rancher/k3s/config.yaml.d/etcd-snapshots.yaml" = lib.mkIf snapshots {
+      source = config.sops.templates."k3s-etcd-snapshots.yaml".path;
+    };
 
     ethpandaops.kubernetes = {
       kubeconfig = lib.mkDefault "${cfg.dataDir}/agent/kubelet.kubeconfig";
       nodeName = lib.mkDefault cfg.nodeName;
       unit = lib.mkDefault "k3s.service";
+      package = lib.mkDefault cfg.package;
     };
 
     ethpandaops.checks = {
