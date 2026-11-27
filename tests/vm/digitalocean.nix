@@ -122,8 +122,14 @@ in
 
         environment.systemPackages = [ pkgs.jq ];
         environment.etc = {
-          "test-keys/metadata".source = keys.snakeOilEd25519PrivateKey;
-          "test-keys/configured".source = keys.snakeOilPrivateKey;
+          "test-keys/metadata" = {
+            source = keys.snakeOilEd25519PrivateKey;
+            mode = "0400";
+          };
+          "test-keys/configured" = {
+            source = keys.snakeOilPrivateKey;
+            mode = "0400";
+          };
         };
       };
 
