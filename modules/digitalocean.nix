@@ -1,32 +1,28 @@
-# A DigitalOcean droplet made from a custom image: nixpkgs' DigitalOcean
-# image (system.build.digitalOceanImage, a gzipped qcow2 to upload as a
-# custom image) with GRUB on /dev/vda and a root filesystem that grows to the
-# droplet's disk, and networking from DigitalOcean's DHCP and the droplet
-# metadata (http://169.254.169.254/metadata/v1.json):
+# A DigitalOcean droplet, installed with nixos-anywhere over one of
+# DigitalOcean's own images (Debian, say):
 #
-# - the public NIC takes its address and DNS from DHCP, which DigitalOcean
-#   serves droplets made from custom images, on UDP 67: a cloud firewall
-#   in front must let it out. Custom images get no IPv6 and no anchor IP;
-#   a reserved IP maps to the public address;
-# - the VPC NIC takes its address from the metadata at each boot, with the
+#   nixos-anywhere --flake .#<host> --extra-files <dir> root@<droplet>
+#
+# <dir> holds the host's SSH host key (etc/ssh/ssh_host_ed25519_key), made
+# beforehand, so its sops recipient is known and its secrets, comin's deploy
+# key among them (deploy.deployKeyFile), are encrypted before the first boot.
+#
+# - Disk: disko's layout on `disk` (/dev/vda): a BIOS boot partition for
+#   GRUB, since droplets boot with SeaBIOS, and ext4 root on the rest, which
+#   reboot trials support.
+# - Network: DigitalOcean serves DHCP only to droplets made from custom
+#   images. Its own images are configured from the droplet metadata,
+#   reached over a link-local address on the public NIC, as cloud-init does,
+#   and so is this. At each boot digitalocean-network.service fetches
+#   http://169.254.169.254/metadata/v1.json into metadataFile, checks both
+#   NICs' MACs against it, and gives them their addresses: on the public NIC
+#   IPv4, the anchor IP for reserved IPs, IPv6 if the droplet has it, the
+#   default routes and the DNS servers; on the VPC NIC its address and the
 #   routes to the rest of 10.0.0.0/8, 172.16.0.0/12 and 192.168.0.0/16
-#   through the VPC gateway, which DigitalOcean only sets up for its own
-#   images. digitalocean-network.service fails if the NICs' MACs don't
-#   match the metadata's, and network-online.target waits for it;
-# - the image doesn't rebuild itself from user data, run the vendor data's
-#   entropy script, write root's authorized_keys (root can't log in) or run
-#   do-agent. metadataKeysUser lets one account accept the droplet's SSH keys.
-# - nixpkgs adds panic=1 and boot.panic_on_fail to every boot, so an initrd
-#   failure reboots after a second; the way back is GRUB's menu on the
-#   droplet console. Trials are unaffected: their panic=60 comes later.
-#
-# The image has no host key and no deploy key: SSH makes the host key at the
-# first boot, so a droplet's sops recipient is only known once it runs.
-# Read it (ssh-keyscan, ssh-to-age), encrypt the host's secrets to it, with
-# comin's deploy key among them (deploy.deployKeyFile), and switch the
-# droplet to its configuration once with nixos-rebuild --target-host. Bake
-# neither key into the image: DigitalOcean keeps it in the account, and
-# every droplet made from it would share them.
+#   through the VPC gateway. network-online.target waits for it, and it's an
+#   outside health check, so a trial whose network never comes up reverts.
+# - Nothing runs from user data or vendor data. metadataKeysUser lets one
+#   account accept the droplet's SSH keys.
 #
 # Droplets have no hardware watchdog, so reboot trials run without one.
 {
@@ -38,28 +34,44 @@
 }:
 let
   cfg = config.ethpandaops.digitalocean;
-  metadata = "/run/do-metadata/v1.json";
-  keysDir = "/run/do-metadata/authorized_keys.d";
-  privateDropIn = "/run/systemd/network/10-digitalocean-private.network.d";
+  keysDir = "/run/digitalocean/authorized_keys.d";
+  waitOnline = "${config.systemd.package}/lib/systemd/systemd-networkd-wait-online";
 
-  privateNetwork = pkgs.writeShellApplication {
+  network = pkgs.writeShellApplication {
     name = "digitalocean-network";
     runtimeInputs = with pkgs; [
       coreutils
+      curl
       jq
       systemd
     ];
     text = ''
-      metadata=${metadata}
+      metadata=${lib.escapeShellArg cfg.metadataFile}
       public=${lib.escapeShellArg cfg.interfaces.public}
       private=${lib.escapeShellArg cfg.interfaces.private}
 
+      ${waitOnline} --interface="$public:degraded" --timeout=120
+      install -d -m 0755 "$(dirname "$metadata")"
+      for _ in $(seq 30); do
+        if curl -fsS --max-time 5 -o "$metadata.tmp" http://169.254.169.254/metadata/v1.json; then
+          break
+        fi
+        sleep 2
+      done
+      if [ ! -s "$metadata.tmp" ]; then
+        echo "no droplet metadata from 169.254.169.254 on $public" >&2
+        exit 1
+      fi
+      chmod 0600 "$metadata.tmp"
+      mv "$metadata.tmp" "$metadata"
+
+      get() { jq -r "$1 // empty" "$metadata"; }
       check_mac() {
         local nic=$1 kind=$2 want have
-        want=$(jq -er --arg kind "$kind" '.interfaces[$kind][0].mac' "$metadata")
+        want=$(get ".interfaces.''${kind}[0].mac")
         have=$(cat "/sys/class/net/$nic/address" 2>/dev/null || echo none)
         if [ "''${want,,}" != "''${have,,}" ]; then
-          echo "the droplet's $kind NIC is $want, but $nic is $have: set ethpandaops.digitalocean.interfaces.$kind" >&2
+          echo "the droplet's $kind NIC is ''${want:-missing}, but $nic is $have: set ethpandaops.digitalocean.interfaces.$kind" >&2
           exit 1
         fi
       }
@@ -73,37 +85,61 @@ let
         done
         echo "$bits"
       }
+      drop_in() {
+        local dir=/run/systemd/network/10-digitalocean-$1.network.d
+        mkdir -p "$dir"
+        cat >"$dir/metadata.conf.tmp"
+        mv "$dir/metadata.conf.tmp" "$dir/metadata.conf"
+      }
 
       check_mac "$public" public
       check_mac "$private" private
-      address=$(jq -er '.interfaces.private[0].ipv4.ip_address' "$metadata")
-      netmask=$(jq -er '.interfaces.private[0].ipv4.netmask' "$metadata")
-      gateway=$(jq -r '.interfaces.private[0].ipv4.gateway // empty' "$metadata")
 
-      mkdir -p ${privateDropIn}
+      p='.interfaces.public[0]'
       {
         echo "[Network]"
-        echo "Address=$address/$(prefix_length "$netmask")"
+        echo "Address=$(get "$p.ipv4.ip_address")/$(prefix_length "$(get "$p.ipv4.netmask")")"
+        echo "Gateway=$(get "$p.ipv4.gateway")"
+        if [ -n "$(get "$p.anchor_ipv4.ip_address")" ]; then
+          echo "Address=$(get "$p.anchor_ipv4.ip_address")/$(prefix_length "$(get "$p.anchor_ipv4.netmask")")"
+        fi
+        if [ -n "$(get "$p.ipv6.ip_address")" ]; then
+          echo "Address=$(get "$p.ipv6.ip_address")/$(get "$p.ipv6.cidr")"
+          echo "Gateway=$(get "$p.ipv6.gateway")"
+        fi
+        get '.dns.nameservers[]?' | sed 's/^/DNS=/'
+      } | drop_in public
+
+      v='.interfaces.private[0]'
+      gateway=$(get "$v.ipv4.gateway")
+      {
+        echo "[Network]"
+        echo "Address=$(get "$v.ipv4.ip_address")/$(prefix_length "$(get "$v.ipv4.netmask")")"
         if [ -n "$gateway" ]; then
           for destination in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
             printf '\n[Route]\nDestination=%s\nGateway=%s\n' "$destination" "$gateway"
           done
         fi
-      } >${privateDropIn}/metadata.conf.tmp
-      mv ${privateDropIn}/metadata.conf.tmp ${privateDropIn}/metadata.conf
+      } | drop_in private
+
       networkctl reload
-      ${config.systemd.package}/lib/systemd/systemd-networkd-wait-online --interface="$private:routable" --timeout=60
-      echo "$private: $address/$(prefix_length "$netmask")''${gateway:+, other private networks through $gateway}"
+      ${waitOnline} --interface="$public:routable" --interface="$private:routable" --timeout=60
+      echo "$public: $(get "$p.ipv4.ip_address"); $private: $(get "$v.ipv4.ip_address")"
     '';
   };
 in
 {
   imports = [
-    (modulesPath + "/virtualisation/digital-ocean-image.nix")
+    (modulesPath + "/profiles/qemu-guest.nix")
     ./checks
   ];
 
   options.ethpandaops.digitalocean = {
+    disk = lib.mkOption {
+      type = lib.types.str;
+      default = "/dev/vda";
+      description = "The droplet's disk, which nixos-anywhere partitions (disko).";
+    };
     interfaces = {
       public = lib.mkOption {
         type = lib.types.str;
@@ -115,6 +151,12 @@ in
         default = "ens4";
         description = "The VPC NIC's name: the droplet's second virtio NIC, in PCI slot 4.";
       };
+    };
+    metadataFile = lib.mkOption {
+      type = lib.types.str;
+      readOnly = true;
+      default = "/run/digitalocean/metadata.json";
+      description = "This boot's droplet metadata (mode 0600), once digitalocean-network.service has started.";
     };
     metadataKeysUser = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
@@ -139,16 +181,8 @@ in
       }
     ];
 
-    virtualisation.digitalOcean = {
-      rebuildFromUserData = lib.mkDefault false;
-      seedEntropy = lib.mkDefault false;
-      setSshKeys = lib.mkDefault false;
-    };
-    services.do-agent.enable = lib.mkOverride 900 false;
-
-    # The droplet console in DigitalOcean's control panel is the first virtual
-    # terminal; the kernel's last console= is where an emergency shell goes.
-    boot.kernelParams = lib.mkAfter [ "console=tty0" ];
+    disko.devices = (import ./digitalocean-layout.nix cfg.disk).disko.devices;
+    boot.loader.grub.enable = true;
 
     networking.useNetworkd = true;
     networking.useDHCP = false;
@@ -156,44 +190,35 @@ in
       "10-digitalocean-public" = {
         matchConfig.Name = cfg.interfaces.public;
         networkConfig = {
-          DHCP = "ipv4";
+          DHCP = "no";
+          LinkLocalAddressing = "ipv4";
           IPv6AcceptRA = false;
-          LinkLocalAddressing = "no";
-          KeepConfiguration = "dynamic";
         };
-        linkConfig.RequiredForOnline = "routable";
       };
       "10-digitalocean-private" = {
         matchConfig.Name = cfg.interfaces.private;
         networkConfig = {
           DHCP = "no";
-          IPv6AcceptRA = false;
           LinkLocalAddressing = "no";
+          IPv6AcceptRA = false;
         };
         linkConfig.RequiredForOnline = "no";
       };
     };
 
-    systemd.services.digitalocean-metadata.serviceConfig.ExecStartPre =
-      "${config.systemd.package}/lib/systemd/systemd-networkd-wait-online --interface=${cfg.interfaces.public}:routable --timeout=120";
-
     systemd.services.digitalocean-network = {
-      description = "Configure the VPC NIC from the droplet metadata";
+      description = "Configure the droplet's network from its metadata";
       wantedBy = [
         "multi-user.target"
         "network-online.target"
       ];
       before = [ "network-online.target" ];
-      requires = [ "digitalocean-metadata.service" ];
-      after = [
-        "digitalocean-metadata.service"
-        "systemd-networkd.service"
-      ];
+      after = [ "systemd-networkd.service" ];
       restartIfChanged = false;
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ExecStart = lib.getExe privateNetwork;
+        ExecStart = lib.getExe network;
         Restart = "on-failure";
         RestartSec = 10;
       };
@@ -213,8 +238,8 @@ in
     systemd.services.digitalocean-authorized-keys = lib.mkIf (cfg.metadataKeysUser != null) {
       description = "Accept the droplet's SSH keys for ${cfg.metadataKeysUser}";
       wantedBy = [ "multi-user.target" ];
-      requires = [ "digitalocean-metadata.service" ];
-      after = [ "digitalocean-metadata.service" ];
+      requires = [ "digitalocean-network.service" ];
+      after = [ "digitalocean-network.service" ];
       path = [
         pkgs.coreutils
         pkgs.jq
@@ -225,7 +250,7 @@ in
       };
       script = ''
         install -d -m 0755 ${keysDir}
-        jq -r '.public_keys[]?' ${metadata} >${keysDir}/.tmp
+        jq -r '.public_keys[]?' ${cfg.metadataFile} >${keysDir}/.tmp
         chmod 0444 ${keysDir}/.tmp
         mv ${keysDir}/.tmp ${keysDir}/${cfg.metadataKeysUser}
       '';

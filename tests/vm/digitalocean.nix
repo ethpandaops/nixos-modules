@@ -1,12 +1,12 @@
-# A droplet booted from the image the digitalocean module builds, with GRUB
-# from its own disk, next to a stand-in for DigitalOcean: DHCP and the
-# metadata service on the public network (eth1), the VPC gateway and a
-# peered network on the VPC (eth2). The image grows its root filesystem;
-# the public NIC takes DHCP, the VPC NIC the metadata's address and routes;
-# node-exporter answers on the VPC only; the droplet's SSH keys log in only
-# to metadataKeysUser; NICs that don't match the metadata's MACs fail
-# digitalocean-network; and a deployed system boots once as a trial and is
-# confirmed, with no hardware watchdog.
+# A droplet's network from its metadata, next to a stand-in for
+# DigitalOcean: the metadata service on the public network's link-local
+# range, a DNS server and the public gateway (eth1), and the VPC gateway and
+# a peered network (eth2). There's no DHCP server. The public NIC gets its
+# IPv4 and IPv6 addresses, anchor IP, default routes and DNS servers from
+# the metadata, and the VPC NIC its address and routes, before
+# network-online.target; node-exporter answers on the VPC only; the
+# droplet's SSH keys log in only to metadataKeysUser; NICs that don't match
+# the metadata's MACs fail digitalocean-network and its health check.
 {
   self,
   lib,
@@ -18,6 +18,9 @@ let
   public = {
     address = "192.0.2.10";
     gateway = "192.0.2.1";
+    anchor = "10.18.0.5";
+    ipv6 = "2001:db8::10";
+    ipv6Gateway = "2001:db8::1";
   };
   private = {
     address = "10.110.16.5";
@@ -39,6 +42,7 @@ in
             droplet_id = 1;
             hostname = "droplet";
             public_keys = [ keys.snakeOilEd25519PublicKey ];
+            dns.nameservers = [ public.gateway ];
             interfaces = {
               public = [
                 {
@@ -48,6 +52,16 @@ in
                     ip_address = public.address;
                     netmask = "255.255.255.0";
                     inherit (public) gateway;
+                  };
+                  anchor_ipv4 = {
+                    ip_address = public.anchor;
+                    netmask = "255.255.0.0";
+                    gateway = "10.18.0.1";
+                  };
+                  ipv6 = {
+                    ip_address = public.ipv6;
+                    cidr = 64;
+                    gateway = public.ipv6Gateway;
                   };
                 }
               ];
@@ -72,16 +86,24 @@ in
           2
         ];
         networking.firewall.enable = false;
-        networking.interfaces.eth1.ipv4.addresses = lib.mkForce [
-          {
-            address = public.gateway;
-            prefixLength = 24;
-          }
-          {
-            address = "169.254.169.254";
-            prefixLength = 32;
-          }
-        ];
+        networking.interfaces.eth1 = {
+          ipv4.addresses = lib.mkForce [
+            {
+              address = public.gateway;
+              prefixLength = 24;
+            }
+            {
+              address = "169.254.169.254";
+              prefixLength = 16;
+            }
+          ];
+          ipv6.addresses = [
+            {
+              address = public.ipv6Gateway;
+              prefixLength = 64;
+            }
+          ];
+        };
         networking.interfaces.eth2.ipv4.addresses = lib.mkForce [
           {
             address = private.gateway;
@@ -92,19 +114,12 @@ in
             prefixLength = 24;
           }
         ];
-        boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
 
         services.dnsmasq = {
           enable = true;
           settings = {
             interface = "eth1";
             bind-interfaces = true;
-            dhcp-range = "${public.address},static,255.255.255.0";
-            dhcp-host = "${mac 1},${public.address}";
-            dhcp-option = [
-              "option:router,${public.gateway}"
-              "option:dns-server,${public.gateway}"
-            ];
             address = "/metadata.test/${public.gateway}";
           };
         };
@@ -133,164 +148,108 @@ in
         };
       };
 
-    droplet =
-      { config, ... }:
-      {
-        imports = [
-          self.nixosModules.default
-          self.nixosModules.digitalocean
-          self.nixosModules.reboot-interactive
+    droplet = {
+      imports = [
+        self.nixosModules.default
+        self.nixosModules.digitalocean
+      ];
+      virtualisation = {
+        vlans = [
+          1
+          2
         ];
-        virtualisation = {
-          vlans = [
-            1
-            2
-          ];
-          memorySize = 2048;
-          diskSize = 4096;
-          directBoot.enable = false;
-          mountHostNixStore = false;
-          useDefaultFilesystems = false;
-          fileSystems = lib.mkForce { };
-          bootLoaderDevice = "/dev/vda";
-        };
-        boot.loader.grub.devices = lib.mkForce [ "/dev/vda" ];
-        networking.interfaces = lib.mkForce { };
-        networking.hostName = "droplet";
-
-        ethpandaops = {
-          digitalocean = {
-            interfaces = {
-              public = "eth1";
-              private = "eth2";
-            };
-            metadataKeysUser = "example";
-          };
-          users.example = {
-            uid = 1001;
-            keys = [ keys.snakeOilPublicKey ];
-          };
-          host.environment = "staging";
-          monitoring = {
-            interface = "eth2";
-            tailscale.enable = false;
-          };
-          deploy = {
-            repository = "/var/lib/remote.git";
-            deployKeyFile = null;
-            healthCheck = {
-              dnsName = null;
-              checkRemote = false;
-            };
-          };
-          reboot.trial.enable = true;
-        };
-        services.comin.enable = lib.mkForce false;
-        # srvos's closure diff can't read the image builder's Nix output.
-        srvos.update-diff.enable = false;
-
-        specialisation.good.configuration.boot.kernelParams = [ "nixhost.test=good" ];
+        memorySize = 1536;
       };
+      networking.interfaces = lib.mkForce { };
+      networking.hostName = "droplet";
+
+      ethpandaops = {
+        digitalocean = {
+          interfaces = {
+            public = "eth1";
+            private = "eth2";
+          };
+          metadataKeysUser = "example";
+        };
+        users.example = {
+          uid = 1001;
+          keys = [ keys.snakeOilPublicKey ];
+        };
+        host.environment = "staging";
+        monitoring = {
+          interface = "eth2";
+          tailscale.enable = false;
+        };
+        deploy = {
+          repository = "/var/lib/remote.git";
+          deployKeyFile = null;
+          healthCheck = {
+            dnsName = null;
+            checkRemote = false;
+          };
+        };
+      };
+      services.comin.enable = lib.mkForce false;
+    };
   };
 
-  testScript =
-    { nodes, ... }:
-    ''
-      import glob
-      import gzip
-      import json
-      import os
-      import shlex
-      import shutil
-      import subprocess
-      import tempfile
+  testScript = ''
+    import json
 
-      cloud.start()
-      cloud.wait_for_unit("metadata.service")
-      cloud.wait_for_open_port(80, "169.254.169.254")
+    def sh(machine, command):
+        return machine.succeed(command).strip()
 
-      image = tempfile.NamedTemporaryFile(suffix=".qcow2")
-      with gzip.open(glob.glob("${nodes.droplet.system.build.digitalOceanImage}/*.qcow2.gz")[0]) as src:
-          shutil.copyfileobj(src, image)
-      image.flush()
-      disk = tempfile.NamedTemporaryFile(suffix=".qcow2")
-      subprocess.run(["${nodes.droplet.virtualisation.qemu.package}/bin/qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", image.name, disk.name, "8G"], check=True)
-      os.environ["NIX_DISK_IMAGE"] = disk.name
+    def ssh(key, user, host="${public.address}"):
+        return f"ssh -n -i /etc/test-keys/{key} -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 {user}@{host} true"
 
-      def sh(machine, command):
-          return machine.succeed(command).strip()
+    cloud.start()
+    cloud.wait_for_unit("metadata.service")
+    cloud.wait_for_open_port(80, "169.254.169.254")
+    droplet.start()
+    droplet.wait_for_unit("digitalocean-network.service")
 
-      def settle():
-          droplet.wait_for_unit("multi-user.target")
-          droplet.wait_until_succeeds("[ $(systemctl show -p ExecMainExitTimestampMonotonic --value nixhost-boot-confirm) != 0 ]", timeout=300)
-          return sh(droplet, "readlink -f /run/booted-system")
+    with subtest("the public NIC takes its addresses, default routes and DNS servers from the metadata, without DHCP"):
+        addresses = sh(droplet, "ip -o addr show dev eth1")
+        for address in ["${public.address}/24", "${public.anchor}/16", "${public.ipv6}/64"]:
+            assert f" {address} " in addresses, addresses
+        assert sh(droplet, "ip -4 route show default").startswith("default via ${public.gateway} dev eth1")
+        assert sh(droplet, "ip -6 route show default").startswith("default via ${public.ipv6Gateway} dev eth1")
+        droplet.succeed("ping -c1 -W5 ${public.ipv6Gateway}")
+        droplet.succeed("resolvectl dns eth1 | grep -q ${public.gateway}")
+        droplet.succeed("getent hosts metadata.test")
+        droplet.fail("journalctl -b -o cat -u systemd-networkd | grep -qi dhcp4")
 
-      def ssh(key, user, host="${public.address}"):
-          return f"ssh -n -i /etc/test-keys/{key} -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 {user}@{host} true"
+    with subtest("the VPC NIC takes the metadata's address, and routes to other private networks through the VPC gateway, before network-online.target"):
+        droplet.succeed("ip -4 -o addr show dev eth2 | grep -q ' ${private.address}/20 '")
+        assert "via ${private.gateway} dev eth2" in sh(droplet, "ip -4 route get ${private.peered}")
+        droplet.succeed("ping -c1 -W5 ${private.peered}")
+        finished = int(sh(droplet, "systemctl show -p ExecMainExitTimestampMonotonic --value digitalocean-network"))
+        online = int(sh(droplet, "systemctl show -p ActiveEnterTimestampMonotonic --value network-online.target"))
+        assert 0 < finished <= online, (finished, online)
+        assert "multi-user.target" in sh(droplet, "systemctl show -p WantedBy --value digitalocean-network")
+        droplet.succeed("systemctl start nixhost-checks.service")
+        check = json.loads(sh(droplet, "cat /run/nixhost/checks/status.json"))["checks"]["digitalocean-network"]
+        assert check["ok"] and check["kind"] == "health" and check["outside"], check
+        assert sh(droplet, "stat -c %a /run/digitalocean/metadata.json") == "600"
 
-      def metric(series):
-          return sh(droplet, f"awk -v s={shlex.quote(series + ' ')} 'index($0, s) == 1 {{ print $NF; exit }}' /var/lib/node-exporter/*.prom")
+    with subtest("node-exporter answers on the VPC NIC only"):
+        cloud.wait_until_succeeds("curl -sf --max-time 5 -o /dev/null http://${private.address}:9100/metrics")
+        cloud.fail("curl -sf --max-time 5 http://${public.address}:9100/metrics")
 
-      droplet.start()
-      base = settle()
+    with subtest("the droplet's SSH keys log in only to metadataKeysUser, and nothing else of the metadata is used"):
+        cloud.wait_until_succeeds(ssh("configured", "example"))
+        cloud.succeed(ssh("metadata", "example"))
+        cloud.fail(ssh("metadata", "root"))
+        droplet.fail("test -e /root/.ssh/authorized_keys")
 
-      with subtest("the image boots with GRUB from its own disk and grows its root filesystem to the disk"):
-          droplet.succeed("dd if=/dev/vda bs=512 count=1 2>/dev/null | grep -q GRUB")
-          assert sh(droplet, "findmnt -no SOURCE /") == "/dev/vda1"
-          size = int(sh(droplet, "df -B1 --output=size / | tail -n1"))
-          assert size > 7 * 1024**3, size
-
-      with subtest("the public NIC takes its address, default route and DNS from DHCP"):
-          droplet.succeed("ip -4 -o addr show dev eth1 | grep -q ' ${public.address}/24 '")
-          assert sh(droplet, "ip -4 route show default").startswith("default via ${public.gateway} dev eth1"), sh(droplet, "ip -4 route show default")
-          droplet.succeed("resolvectl dns eth1 | grep -q ${public.gateway}")
-          droplet.succeed("getent hosts metadata.test")
-
-      with subtest("the VPC NIC takes the metadata's address, and routes to other private networks through the VPC gateway, before network-online.target"):
-          droplet.succeed("ip -4 -o addr show dev eth2 | grep -q ' ${private.address}/20 '")
-          assert "via ${private.gateway} dev eth2" in sh(droplet, "ip -4 route get ${private.peered}")
-          droplet.succeed("ping -c1 -W5 ${private.peered}")
-          finished = int(sh(droplet, "systemctl show -p ExecMainExitTimestampMonotonic --value digitalocean-network"))
-          online = int(sh(droplet, "systemctl show -p ActiveEnterTimestampMonotonic --value network-online.target"))
-          assert 0 < finished <= online, (finished, online)
-          assert "multi-user.target" in sh(droplet, "systemctl show -p WantedBy --value digitalocean-network")
-          droplet.succeed("systemctl start nixhost-checks.service")
-          check = json.loads(sh(droplet, "cat /run/nixhost/checks/status.json"))["checks"]["digitalocean-network"]
-          assert check["ok"] and check["kind"] == "health" and check["outside"], check
-
-      with subtest("node-exporter answers on the VPC NIC only"):
-          cloud.wait_until_succeeds("curl -sf --max-time 5 -o /dev/null http://${private.address}:9100/metrics")
-          cloud.fail("curl -sf --max-time 5 http://${public.address}:9100/metrics")
-
-      with subtest("the droplet's SSH keys log in only to metadataKeysUser, and nothing else of the metadata is used"):
-          cloud.wait_until_succeeds(ssh("configured", "example"))
-          cloud.succeed(ssh("metadata", "example"))
-          cloud.fail(ssh("metadata", "root"))
-          droplet.fail("test -e /root/.ssh/authorized_keys")
-          for unit in ["digitalocean-init", "digitalocean-entropy-seed", "digitalocean-set-root-password", "do-agent"]:
-              droplet.fail(f"systemctl cat {unit}.service")
-
-      with subtest("NICs that aren't the metadata's fail digitalocean-network, naming the option"):
-          cloud.succeed("jq '.interfaces.public[0].mac as $p | .interfaces.public[0].mac = .interfaces.private[0].mac | .interfaces.private[0].mac = $p' /var/lib/metadata/metadata/v1.json > /tmp/v1.json && cp /var/lib/metadata/metadata/v1.json /tmp/good.json && cp /tmp/v1.json /var/lib/metadata/metadata/v1.json")
-          droplet.execute("rm /run/do-metadata/v1.json && systemctl restart digitalocean-metadata.service")
-          droplet.fail("systemctl restart digitalocean-network.service")
-          droplet.succeed("journalctl -b -o cat -u digitalocean-network | grep -q \"the droplet's public NIC is .*, but eth1 is .*: set ethpandaops.digitalocean.interfaces.public\"")
-          cloud.succeed("cp /tmp/good.json /var/lib/metadata/metadata/v1.json")
-          droplet.succeed("rm /run/do-metadata/v1.json", "systemctl restart digitalocean-metadata.service", "systemctl restart digitalocean-network.service")
-
-      with subtest("a deployed system boots once as a trial on the droplet's disk and is confirmed, with no hardware watchdog"):
-          assert metric("nixhost_boot_trial_supported") == "1"
-          assert metric("nixhost_boot_watchdog_present") == "0"
-          droplet.wait_until_succeeds("journalctl -t nixhost-notify -o cat | grep -q 'No hardware watchdog: '")
-          good = sh(droplet, f"readlink -f {base}/specialisation/good")
-          droplet.succeed(f"{good}/bin/switch-to-configuration boot", "sync")
-          droplet.execute("systemctl --no-block reboot", check_output=False)
-          droplet.wait_for_shutdown()
-          droplet.start()
-          assert settle() == good
-          droplet.succeed(f"grep -q 'nixhost.trial={good.split('/')[-1]}' /proc/cmdline")
-          trial = json.loads(sh(droplet, "cat /var/lib/nixhost-boot/trial.json"))
-          assert trial["system"] == good and trial["confirmed"] == base and trial["outcome"] == "confirmed", trial
-          droplet.succeed("ip -4 -o addr show dev eth2 | grep -q ' ${private.address}/20 '")
-    '';
+    with subtest("NICs that aren't the metadata's fail digitalocean-network and its check, naming the option"):
+        cloud.succeed("cp /var/lib/metadata/metadata/v1.json /tmp/good.json")
+        cloud.succeed("jq '.interfaces.public[0].mac as $p | .interfaces.public[0].mac = .interfaces.private[0].mac | .interfaces.private[0].mac = $p' /tmp/good.json > /var/lib/metadata/metadata/v1.json")
+        droplet.fail("systemctl restart digitalocean-network.service")
+        droplet.succeed("journalctl -b -o cat -u digitalocean-network | grep -q \"the droplet's public NIC is .*, but eth1 is .*: set ethpandaops.digitalocean.interfaces.public\"")
+        droplet.succeed("systemctl start nixhost-checks.service")
+        assert not json.loads(sh(droplet, "cat /run/nixhost/checks/status.json"))["checks"]["digitalocean-network"]["ok"]
+        cloud.succeed("cp /tmp/good.json /var/lib/metadata/metadata/v1.json")
+        droplet.wait_until_succeeds("systemctl is-active digitalocean-network.service", timeout=60)
+  '';
 }
