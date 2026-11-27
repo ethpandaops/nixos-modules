@@ -73,6 +73,140 @@ in
   reboot-trial-boot-md10 = trialTest false "md10";
   comin-ssh = vmTest ./vm/comin-ssh.nix;
   banlist = vmTest ./vm/banlist.nix;
+  k3s = vmTest ./vm/k3s.nix;
+
+  # The k3s module's agents and joining servers, which the VM test's single
+  # server doesn't show. Evaluated, not built.
+  k3s-roles =
+    let
+      node =
+        settings:
+        (server.extendModules {
+          modules = [
+            self.nixosModules.k3s
+            {
+              ethpandaops.k3s = {
+                package = pkgs.k3s;
+              }
+              // settings;
+            }
+          ];
+        }).config;
+      join = {
+        serverAddr = "https://192.0.2.1:6443";
+        tokenFile = "/run/k3s-token";
+      };
+      snapshots = {
+        enable = true;
+        bucket = "etcd";
+        folder = "example";
+      };
+      agent = node ({ role = "agent"; } // join);
+      first = node {
+        role = "server";
+        etcdSnapshots = snapshots;
+      };
+      joining = node ({ role = "server"; } // join);
+
+      execStart = c: c.systemd.services.k3s.serviceConfig.ExecStart;
+      guarded =
+        c:
+        lib.hasInfix "k3s-etcd-guard" (toString (c.systemd.services.k3s.serviceConfig.ExecStartPre or [ ]));
+      inhibitors = c: lib.filter (lib.hasPrefix "k3s") (lib.attrNames c.system.switch.inhibitors);
+      kubeletConfigRefused =
+        flags:
+        refused "ethpandaops.k3s.extraFlags sets the kubelet's config file" (node {
+          role = "server";
+          extraFlags = flags;
+        });
+      results = {
+        "every spelling of the kubelet's config file in extraFlags is refused" =
+          lib.all kubeletConfigRefused
+            [
+              [ "--kubelet-arg=config=/x" ]
+              [
+                "--kubelet-arg"
+                "config=/x"
+              ]
+              [ "--kubelet-arg config=/x" ]
+              [ "--kubelet-arg=--config=/x" ]
+            ];
+        "other kubelet args are accepted" =
+          !kubeletConfigRefused [
+            "--kubelet-arg=max-pods=200"
+            "--node-label=config=x"
+          ];
+        "agent registers with its server" = lib.hasInfix "--server https://192.0.2.1:6443" (
+          execStart agent
+        );
+        "agent restarts on a switch" = agent.systemd.services.k3s.restartIfChanged;
+        "agent has no etcd guard" = !guarded agent;
+        "agent has no pre-minor snapshot" = !(agent.systemd.services ? k3s-pre-minor-snapshot);
+        "agent's switch inhibitors" = inhibitors agent == [ "k3s-version" ];
+        "agent's rollback guard" = lib.attrNames agent.ethpandaops.rollback.guard == [ "k3s-minor" ];
+        "agent's k3s checks are outside health checks" =
+          lib.all (c: agent.ethpandaops.checks.${c}.kind == "health" && agent.ethpandaops.checks.${c}.outside)
+            [
+              "k3s"
+              "kubelet"
+            ];
+        "server's k3s checks are readiness checks" =
+          lib.all
+            (c: first.ethpandaops.checks.${c}.kind == "readiness" && !first.ethpandaops.checks.${c}.outside)
+            [
+              "k3s"
+              "kubelet"
+            ];
+        "first server starts etcd" = lib.hasInfix "--cluster-init" (execStart first);
+        "first server has the etcd guard" = guarded first;
+        "first server waits for a reboot" = !first.systemd.services.k3s.restartIfChanged;
+        "first server's switch inhibitors" =
+          inhibitors first == [
+            "k3s-server-snapshots"
+            "k3s-server-unit"
+            "k3s-version"
+          ];
+        "joining server joins" =
+          lib.hasInfix "--server https://192.0.2.1:6443" (execStart joining)
+          && !lib.hasInfix "--cluster-init" (execStart joining);
+        "joining server has no etcd guard" = !guarded joining;
+        "joining server's snapshot inhibitor is off" =
+          joining.system.switch.inhibitors.k3s-server-snapshots == "off";
+      };
+      # Settings the module refuses, each by the start of its message.
+      refusals = {
+        "ethpandaops.k3s.serverAddr is required" = node { role = "agent"; };
+        "ethpandaops.k3s.tokenFile is required" = node {
+          role = "agent";
+          serverAddr = "https://192.0.2.1:6443";
+        };
+        "ethpandaops.k3s.dataDir is" =
+          (server.extendModules {
+            modules = [
+              self.nixosModules.k3s
+              {
+                ethpandaops.k3s = {
+                  package = pkgs.k3s;
+                  role = "server";
+                  dataDir = "/srv/k3s";
+                };
+                services.k3s.manifests.example.content = { };
+              }
+            ];
+          }).config;
+      };
+      refused = message: c: lib.any (a: !a.assertion && lib.hasPrefix message a.message) c.assertions;
+      failed =
+        lib.attrNames (lib.filterAttrs (_: ok: !ok) results)
+        ++ map (m: "accepted: ${m}") (lib.attrNames (lib.filterAttrs (m: c: !refused m c) refusals));
+    in
+    pkgs.runCommand "k3s-roles" { failed = lib.concatStringsSep "; " failed; } ''
+      if [ -n "$failed" ]; then
+        echo "k3s-roles failed: $failed"
+        exit 1
+      fi
+      touch $out
+    '';
 
   # raid1-disks refuses a kernel that can't assemble arrays made by a newer one.
   raid1-rejects-old-kernel =
