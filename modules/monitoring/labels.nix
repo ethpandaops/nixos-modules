@@ -1,8 +1,8 @@
 # What a host is called in metrics, alerts and logs: its host name (the
 # nixhost label), its fleet and its environment.
 #
-# The scraper sets the metric labels nixhost, fleet and environment itself
-# (platform's nix-hosts-monitoring), so the box can't relabel its own series.
+# The scraper sets the metric labels nixhost, fleet and environment itself,
+# so the box can't relabel its own series.
 # The box states the same values in nixhost_info, under configured_* labels,
 # so an alert can catch the two disagreeing, and puts them on its shipped logs
 # (host.name, ethpandaops.fleet, deployment.environment).
