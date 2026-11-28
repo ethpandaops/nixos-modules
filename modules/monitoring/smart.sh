@@ -5,10 +5,10 @@
 accepted=$(jq -c '.acceptedSerials' "$SETTINGS")
 
 # The scan smartd's DEVICESCAN uses: SATA, SAS, NVMe and drives behind
-# MegaRAID controllers, with the type smartctl detected (sat, scsi, nvme,
-# megaraid,N, ...) and why a device wouldn't open. Before any output, so a
-# failed scan leaves the last metrics in place.
-devices=$(smartctl --scan-open -j | jq -r '.devices[]? | [.name, .type, .open_error // ""] | @tsv')
+# MegaRAID controllers, each with a type (scsi, nvme, megaraid,N, a USB
+# bridge's). It reads sysfs and doesn't open the drives. Before any output,
+# so a failed scan leaves the last metrics in place.
+devices=$(timeout 60 smartctl --scan -j | jq -r '.devices[]? | [.name, .type] | @tsv')
 
 {
   echo "# HELP nixhost_smart_read_ok 1 when smartctl read the drive's SMART data, 0 when it couldn't open or read it, or hung."
@@ -37,15 +37,15 @@ devices=$(smartctl --scan-open -j | jq -r '.devices[]? | [.name, .type, .open_er
   echo "# TYPE nixhost_smart_temperature_celsius gauge"
   echo "# HELP nixhost_smart_power_on_seconds_total How long the drive has been powered on."
   echo "# TYPE nixhost_smart_power_on_seconds_total counter"
-  while IFS=$'\t' read -r name type error; do
+  while IFS=$'\t' read -r name type; do
     [ -n "$name" ] || continue
-    # smartctl's exit status is a bit mask that is non-zero for a failing
-    # drive; its JSON says what it read either way. A failing drive can
-    # hang it, so each drive gets a minute.
-    json=""
-    if [ -z "$error" ]; then
-      json=$(timeout 60 smartctl -j -a -d "$type" "$name" 2>/dev/null || true)
-    fi
+    # A plain "scsi" from the scan is detected when opened, so a SATA drive
+    # behind it reads as sat. smartctl's exit status is a bit mask that is
+    # non-zero for a failing drive; its JSON says what it read either way. A
+    # failing drive can hang it, so each drive gets a minute.
+    detect=$type
+    [ "$detect" != scsi ] || detect=auto
+    json=$(timeout 60 smartctl -j -a -d "$detect" "$name" 2>/dev/null || true)
     if ! jq -e '.smartctl' >/dev/null 2>&1 <<<"$json"; then
       printf 'nixhost_smart_read_ok{device="%s",type="%s",serial="",model=""} 0\n' "${name#/dev/}" "$type"
       continue

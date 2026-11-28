@@ -1,14 +1,14 @@
 # One drive's smartctl -j -a output to nixhost_smart_* lines, for
-# smart.sh. $d is the device name, $t its smartctl type, $accepted the
-# accepted serials. A device that has no SMART at all gets no lines; smartd
-# skips it too.
+# smart.sh. $d is the device name, $t its type from the scan (the type
+# smartctl detected wins), $accepted the accepted serials. A device that has
+# no SMART at all gets no lines; smartd skips it too.
 def esc: tostring | gsub("\\\\"; "\\\\") | gsub("\""; "\\\"") | gsub("\n"; "\\n");
 def line($name; $labels; $value): select($value != null) | "\($name){\($labels)} \($value)";
 def ata($id): [.ata_smart_attributes.table[]? | select(.id == $id) | .raw.value] | first;
 
 select(.smart_support.available != false)
 | (.serial_number // "") as $serial
-| "device=\"\($d)\",type=\"\($t)\",serial=\"\($serial | esc)\",model=\"\(.model_name // "" | esc)\"" as $l
+| "device=\"\($d)\",type=\"\(.device.type // $t)\",serial=\"\($serial | esc)\",model=\"\(.model_name // "" | esc)\"" as $l
 | (.nvme_smart_health_information_log // null) as $n
 | (if .smart_status.passed == null then null elif .smart_status.passed then 1 else 0 end) as $healthy
 | line("nixhost_smart_read_ok"; $l; if .smart_status == null then 0 else 1 end),
