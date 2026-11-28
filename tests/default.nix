@@ -60,6 +60,7 @@ in
   checks = vmTest ./vm/checks.nix;
   k3s-checks = vmTest ./vm/k3s-checks.nix;
   monitoring = vmTest ./vm/monitoring.nix;
+  smart = vmTest ./vm/smart.nix;
   drift = vmTest ./vm/drift.nix;
   logs = vmTest ./vm/logs.nix;
   vulnix = vmTest ./vm/vulnix.nix;

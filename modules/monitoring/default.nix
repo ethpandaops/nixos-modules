@@ -18,6 +18,7 @@ in
     ./kernel.nix
     ./labels.nix
     ./logs.nix
+    ./smart.nix
     ./vulnix.nix
   ];
 
