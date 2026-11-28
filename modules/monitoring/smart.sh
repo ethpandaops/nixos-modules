@@ -1,15 +1,17 @@
-# nixhost-smart: every whole disk's SMART state as textfile metrics
-# (monitoring/smart.nix). Read-only: smartctl -j -a on each.
+# nixhost-smart: the SMART state of the drives smartd watches, as textfile
+# metrics (monitoring/smart.nix). Read-only: smartctl -j -a on each.
 # shellcheck shell=bash
 
 accepted=$(jq -c '.acceptedSerials' "$SETTINGS")
 
-disks() {
-  lsblk -dn -o NAME,TYPE | awk '$2 == "disk" { print $1 }' | grep -vE '^(loop|ram|zram|nbd|sr)'
-}
+# The scan smartd's DEVICESCAN uses: SATA, SAS, NVMe and drives behind
+# MegaRAID controllers, with the type smartctl detected (sat, scsi, nvme,
+# megaraid,N, ...) and why a device wouldn't open. Before any output, so a
+# failed scan leaves the last metrics in place.
+devices=$(smartctl --scan-open -j | jq -r '.devices[]? | [.name, .type, .open_error // ""] | @tsv')
 
 {
-  echo "# HELP nixhost_smart_read_ok 1 when smartctl read the drive's SMART data, 0 when it couldn't."
+  echo "# HELP nixhost_smart_read_ok 1 when smartctl read the drive's SMART data, 0 when it couldn't open or read it, or hung."
   echo "# TYPE nixhost_smart_read_ok gauge"
   echo "# HELP nixhost_smart_healthy 1 while the drive's overall SMART health passes, 0 when it fails."
   echo "# TYPE nixhost_smart_healthy gauge"
@@ -33,16 +35,21 @@ disks() {
   echo "# TYPE nixhost_smart_ata_offline_uncorrectable gauge"
   echo "# HELP nixhost_smart_temperature_celsius The drive's temperature."
   echo "# TYPE nixhost_smart_temperature_celsius gauge"
-  echo "# HELP nixhost_smart_power_on_hours Hours the drive has been powered on."
-  echo "# TYPE nixhost_smart_power_on_hours counter"
-  for d in $(disks); do
+  echo "# HELP nixhost_smart_power_on_seconds_total How long the drive has been powered on."
+  echo "# TYPE nixhost_smart_power_on_seconds_total counter"
+  while IFS=$'\t' read -r name type error; do
+    [ -n "$name" ] || continue
     # smartctl's exit status is a bit mask that is non-zero for a failing
-    # drive; its JSON says what it read either way.
-    json=$(smartctl -j -a "/dev/$d" 2>/dev/null || true)
+    # drive; its JSON says what it read either way. A failing drive can
+    # hang it, so each drive gets a minute.
+    json=""
+    if [ -z "$error" ]; then
+      json=$(timeout 60 smartctl -j -a -d "$type" "$name" 2>/dev/null || true)
+    fi
     if ! jq -e '.smartctl' >/dev/null 2>&1 <<<"$json"; then
-      printf 'nixhost_smart_read_ok{device="%s"} 0\n' "$d"
+      printf 'nixhost_smart_read_ok{device="%s",type="%s",serial="",model=""} 0\n' "${name#/dev/}" "$type"
       continue
     fi
-    jq -r --arg d "$d" --argjson accepted "$accepted" -f "$METRICS_JQ" <<<"$json"
-  done
+    jq -r --arg d "${name#/dev/}" --arg t "$type" --argjson accepted "$accepted" -f "$METRICS_JQ" <<<"$json"
+  done <<<"$devices"
 } | write_metrics smart
