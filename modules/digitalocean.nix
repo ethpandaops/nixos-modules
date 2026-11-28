@@ -19,12 +19,14 @@
 #   copy under /var/lib/digitalocean; if the service doesn't answer, it
 #   configures the network from that copy, then fails and retries until a
 #   fetch works. It checks both NICs' MACs against the metadata and gives
-#   them their addresses: on the public NIC
-#   IPv4, the anchor IP for reserved IPs, IPv6 if the droplet has it, the
-#   default routes and the DNS servers; on the VPC NIC its address and the
-#   routes to the rest of 10.0.0.0/8, 172.16.0.0/12 and 192.168.0.0/16
-#   through the VPC gateway. network-online.target waits for it, and it's an
-#   outside health check, so a trial whose network never comes up reverts.
+#   them their addresses. The public NIC gets IPv4, the anchor IP for
+#   reserved IPs, IPv6 if the droplet has it, the default routes and the
+#   DNS servers outside the VPC. The VPC NIC gets its address, the DNS
+#   servers inside the VPC (current droplets get only the VPC's resolver),
+#   and the routes to the rest of 10.0.0.0/8, 172.16.0.0/12 and
+#   192.168.0.0/16 through the VPC gateway. network-online.target waits for
+#   it, and it's an outside health check, so a trial whose network never
+#   comes up reverts.
 # - Nothing runs from user data or vendor data. metadataKeysUser lets one
 #   account accept the droplet's SSH keys.
 #
@@ -102,6 +104,15 @@ let
         done
         echo "$bits"
       }
+      ipv4_int() {
+        local IFS=. a b c d
+        read -r a b c d <<<"$1"
+        echo $(((a << 24) | (b << 16) | (c << 8) | d))
+      }
+      in_subnet() {
+        local mask=$((0xffffffff << (32 - $3) & 0xffffffff))
+        [ $(($(ipv4_int "$1") & mask)) -eq $(($(ipv4_int "$2") & mask)) ]
+      }
       drop_in() {
         local dir=/run/systemd/network/10-digitalocean-$1.network.d
         mkdir -p "$dir"
@@ -111,6 +122,19 @@ let
 
       check_mac "$public" public
       check_mac "$private" private
+
+      v='.interfaces.private[0]'
+      private_address=$(get "$v.ipv4.ip_address")
+      private_prefix=$(prefix_length "$(get "$v.ipv4.netmask")")
+      public_dns=()
+      private_dns=()
+      for server in $(get '.dns.nameservers[]?'); do
+        if [[ $server != *:* ]] && in_subnet "$server" "$private_address" "$private_prefix"; then
+          private_dns+=("$server")
+        else
+          public_dns+=("$server")
+        fi
+      done
 
       p='.interfaces.public[0]'
       {
@@ -124,14 +148,14 @@ let
           echo "Address=$(get "$p.ipv6.ip_address")/$(get "$p.ipv6.cidr")"
           echo "Gateway=$(get "$p.ipv6.gateway")"
         fi
-        get '.dns.nameservers[]?' | sed 's/^/DNS=/'
+        for server in "''${public_dns[@]}"; do echo "DNS=$server"; done
       } | drop_in public
 
-      v='.interfaces.private[0]'
       gateway=$(get "$v.ipv4.gateway")
       {
         echo "[Network]"
-        echo "Address=$(get "$v.ipv4.ip_address")/$(prefix_length "$(get "$v.ipv4.netmask")")"
+        echo "Address=$private_address/$private_prefix"
+        for server in "''${private_dns[@]}"; do echo "DNS=$server"; done
         if [ -n "$gateway" ]; then
           for destination in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
             printf '\n[Route]\nDestination=%s\nGateway=%s\n' "$destination" "$gateway"

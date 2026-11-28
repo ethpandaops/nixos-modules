@@ -21,12 +21,14 @@ let
     gateway = "192.0.2.1";
     anchor = "10.18.0.5";
     ipv6 = "2001:db8::10";
+    ipv6Metadata = "2001:0DB8:0000:0000:0000:0000:0000:0010";
     ipv6Gateway = "2001:db8::1";
   };
   private = {
     address = "10.110.16.5";
     gateway = "10.110.16.1";
     peered = "10.200.0.1";
+    resolver = "10.110.31.254";
   };
 in
 {
@@ -43,7 +45,7 @@ in
             droplet_id = 1;
             hostname = "droplet";
             public_keys = [ keys.snakeOilEd25519PublicKey ];
-            dns.nameservers = [ public.gateway ];
+            dns.nameservers = [ private.resolver ];
             interfaces = {
               public = [
                 {
@@ -60,7 +62,7 @@ in
                     gateway = "10.18.0.1";
                   };
                   ipv6 = {
-                    ip_address = public.ipv6;
+                    ip_address = public.ipv6Metadata;
                     cidr = 64;
                     gateway = public.ipv6Gateway;
                   };
@@ -114,12 +116,17 @@ in
             address = private.peered;
             prefixLength = 24;
           }
+          {
+            address = private.resolver;
+            prefixLength = 20;
+          }
         ];
 
         services.dnsmasq = {
           enable = true;
           settings = {
-            interface = "eth1";
+            interface = "eth2";
+            listen-address = private.resolver;
             bind-interfaces = true;
             address = "/metadata.test/${public.gateway}";
           };
@@ -219,14 +226,15 @@ in
     droplet.start()
     droplet.wait_for_unit("digitalocean-network.service")
 
-    with subtest("the public NIC takes its addresses, default routes and DNS servers from the metadata, without DHCP"):
+    with subtest("the public NIC takes its addresses and default routes from the metadata, and the VPC NIC the VPC's resolver, without DHCP"):
         addresses = sh(droplet, "ip -o addr show dev eth1")
         for address in ["${public.address}/24", "${public.anchor}/16", "${public.ipv6}/64"]:
             assert f" {address} " in addresses, addresses
         assert sh(droplet, "ip -4 route show default").startswith("default via ${public.gateway} dev eth1")
         assert sh(droplet, "ip -6 route show default").startswith("default via ${public.ipv6Gateway} dev eth1")
         droplet.succeed("ping -c1 -W5 ${public.ipv6Gateway}")
-        droplet.succeed("resolvectl dns eth1 | grep -q ${public.gateway}")
+        droplet.succeed("resolvectl dns eth2 | grep -q ${private.resolver}")
+        droplet.fail("resolvectl dns eth1 | grep -q ${private.resolver}")
         droplet.succeed("getent hosts metadata.test")
         droplet.fail("journalctl -b -o cat -u systemd-networkd | grep -qi dhcp4")
 
