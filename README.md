@@ -57,8 +57,7 @@ is [tests/server.nix](tests/server.nix).
 | `raid1-disks` | disko layout: mdadm RAID1 for the ESP and root on every listed disk, GRUB on each |
 
 Every box-side check writes `nixhost_*` metrics through node-exporter's
-textfile collector; alert rules live with the scraper, in platform's
-`nix-hosts-monitoring`.
+textfile collector; alert rules live with the scraper.
 
 ## Host repo CI
 

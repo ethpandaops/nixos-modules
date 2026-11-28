@@ -233,7 +233,7 @@ in
         "echo 'raid1-disks accepted a 6.18 kernel'; exit 1"
     );
 
-  # The keys rollouts read (nixos-utility's promoter classifies changes by them).
+  # The keys rollouts read (the promoter classifies changes by them).
   fingerprint =
     let
       keys = lib.attrNames server.config.ethpandaops.fingerprint;
